@@ -1,0 +1,30 @@
+# Raw recording -> clean epochs.
+# Provisional defaults, written before the preprocessing code exists; revisit when it lands.
+
+montage: biosemi32
+
+# EXG1-8 are external electrodes that channels.tsv labels as EEG; they are not scalp channels.
+drop_channels: [EXG1, EXG2, EXG3, EXG4, EXG5, EXG6, EXG7, EXG8]
+
+# BioSemi recordings are reference-free and must be re-referenced offline.
+reference: average
+
+resample_sfreq: null  # Hz; null keeps the native 512 Hz
+
+filter:
+  l_freq: 1.0         # Hz; ICLabel expects 1-100 Hz band-passed data
+  h_freq: 100.0
+  notch_freqs: [60.0]
+
+ica:
+  method: infomax
+  extended: true      # extended infomax, as ICLabel was trained on
+  n_components: null  # null lets MNE choose from the data rank
+  random_state: 97
+  iclabel_exclude: [eye blink, muscle artifact, heart beat, line noise, channel noise]
+  iclabel_threshold: 0.8
+
+epochs:
+  duration: 10.0      # seconds
+  overlap: 0.0        # seconds
+  reject_peak_to_peak_uv: null

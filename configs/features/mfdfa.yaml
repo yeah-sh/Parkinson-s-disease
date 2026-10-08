@@ -1,0 +1,17 @@
+# Multifractal Detrended Fluctuation Analysis, per channel and epoch.
+# Provisional defaults, written before the feature code exists; revisit when it lands.
+
+# Moment orders q, from q_min to q_max inclusive.
+q_min: -5.0
+q_max: 5.0
+q_step: 0.5
+
+# Window sizes in samples, log-spaced. With 10 s epochs at 512 Hz (5120 samples),
+# scale_max stays at a tenth of the epoch so every scale has at least 10 windows.
+scale_min: 16
+scale_max: 512
+n_scales: 20
+
+detrend_order: 1      # polynomial order removed from each window
+
+features: [hurst_q2, delta_h, alpha_peak, alpha_width, alpha_asymmetry]

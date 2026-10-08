@@ -1,0 +1,19 @@
+# Band-power baseline features, per channel and epoch.
+# Provisional defaults, written before the feature code exists; revisit when it lands.
+
+method: welch
+fmin: 1.0             # Hz
+fmax: 48.0
+window_sec: 2.0       # Welch segment length
+overlap: 0.5          # fraction of a segment
+
+relative: true        # divide each band by total power in [fmin, fmax]
+log: true             # log10 of band power
+
+# [low, high) in Hz. Contiguous, unlike the legacy notebooks (which left a 12-13 Hz gap).
+bands:
+  delta: [1.0, 4.0]
+  theta: [4.0, 8.0]
+  alpha: [8.0, 13.0]
+  beta: [13.0, 30.0]
+  gamma: [30.0, 48.0]

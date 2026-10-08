@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdeeg"
+version = "0.1.0"
+description = "Multifractal (MFDFA) and band-power analysis of resting-state EEG in Parkinson's disease (OpenNeuro ds002778)."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+# Exact pins. This set resolves on both Python 3.11 and 3.12; numpy and scipy are held one
+# minor release back because numpy 2.5 / scipy 1.18 no longer support 3.11.
+dependencies = [
+    "mne==1.13.2",
+    "mne-bids==0.20.0",
+    "mne-icalabel==0.10.0",
+    "onnxruntime==1.30.0",  # inference backend for mne-icalabel (it needs this or torch)
+    "openneuro-py==2026.9.1",
+    "numpy==2.4.6",
+    "scipy==1.17.1",
+    "pandas==3.0.6",
+    "pyarrow==25.0.1",
+    "scikit-learn==1.9.1",
+    "joblib==1.6.0",
+    "matplotlib==3.11.2",
+    "pyyaml==6.0.3",
+    "mlflow==3.17.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.10",
+]
+
+[project.scripts]
+pdeeg = "pdeeg.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pdeeg"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+# legacy/ holds the original notebooks, kept unchanged; ruff would otherwise lint them.
+# Do not add a bare "data" here: it would also exclude src/pdeeg/data/.
+extend-exclude = ["legacy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "PTH"]

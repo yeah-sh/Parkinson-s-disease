@@ -1,0 +1,23 @@
+# Dataset identity and on-disk locations.
+# Relative paths are resolved against the project root (the directory that contains configs/).
+
+dataset:
+  id: ds002778        # OpenNeuro: UC San Diego resting-state EEG, Parkinson's disease and controls
+  version: "1.0.5"
+  task: rest
+  datatype: eeg
+  extension: .bdf
+  line_freq: 60.0     # Hz, from the BIDS sidecars
+
+paths:
+  raw: data/raw/ds002778
+  interim: data/interim
+  processed: data/processed
+  reports: reports
+
+# BIDS session label -> condition name used throughout the pipeline.
+# Keep "off" and "on" quoted: unquoted, YAML reads them as booleans.
+sessions:
+  hc: HC
+  "off": PD_OFF
+  "on": PD_ON

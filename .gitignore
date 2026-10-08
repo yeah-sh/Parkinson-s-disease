@@ -1,1 +1,36 @@
-.venv
+# Environments
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Data: only the directory skeleton is tracked.
+# The leading slash anchors these to the repo root so src/pdeeg/data/ is NOT ignored.
+/data/*
+!/data/raw/
+!/data/interim/
+!/data/processed/
+/data/raw/*
+/data/interim/*
+/data/processed/*
+!/data/*/.gitkeep
+
+# Serialised objects and models
+*.pkl
+*.pickle
+*.joblib
+
+# Experiment tracking
+mlruns/
+mlartifacts/
+mlflow.db

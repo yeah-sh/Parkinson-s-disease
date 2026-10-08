@@ -1,0 +1,30 @@
+# Classification and experiment tracking.
+# Provisional defaults, written before the modelling code exists; revisit when it lands.
+
+random_state: 42
+
+# Each task contrasts two sets of conditions (names come from sessions in data.yaml).
+tasks:
+  pd_vs_hc:           # unmedicated patients against controls: one recording per participant
+    positive: [PD_OFF]
+    negative: [HC]
+  off_vs_on:          # paired: the same 15 patients in both classes
+    positive: [PD_OFF]
+    negative: [PD_ON]
+
+feature_sets: [psd, mfdfa]
+classifiers: [logistic_regression, linear_svm]
+
+# Splits are always grouped by participant so that no person's epochs, or their OFF and ON
+# sessions, fall on both sides of a split. The legacy notebooks split at epoch level.
+cv:
+  scheme: leave_one_subject_out
+  group_key: participant_id
+  n_permutations: 1000
+
+# MLflow 3.17 no longer accepts a plain ./mlruns directory as the tracking store, so runs are
+# recorded in a SQLite database and only the artifacts go to a directory.
+tracking:
+  db: mlflow.db       # SQLite tracking database
+  artifacts: mlruns   # artifact store
+  experiment: pdeeg
