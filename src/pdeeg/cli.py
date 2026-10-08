@@ -1,6 +1,6 @@
 """Command-line entry point, installed as ``pdeeg``.
 
-Only ``pdeeg config`` exists so far; pipeline stages are added as subcommands as they are written.
+Pipeline stages are added as subcommands as they are written.
 """
 
 from __future__ import annotations
@@ -15,7 +15,30 @@ from typing import Any
 import yaml
 
 from pdeeg import __version__
-from pdeeg.config import CONFIG_DIR_ENV, ConfigError, load_config
+from pdeeg.config import CONFIG_DIR_ENV, Config, ConfigError, load_config
+
+
+def _write_recordings(config: Config) -> int:
+    # Imported here because mne takes seconds to import and `pdeeg config` does not need it.
+    from pdeeg.data.bids import DatasetError, list_recordings
+
+    data = config.data
+    try:
+        recordings = list_recordings(
+            data.paths.raw, data.sessions, rename_columns=data.participants_rename
+        )
+    except DatasetError as exc:
+        print(f"pdeeg: {exc}", file=sys.stderr)
+        return 1
+    data.paths.recordings.parent.mkdir(parents=True, exist_ok=True)
+    recordings.to_parquet(data.paths.recordings, index=False)
+
+    summary = recordings.groupby(["group", "session"], sort=False).agg(
+        recordings=("subject", "size"), participants=("subject", "nunique")
+    )
+    print(summary.to_string())
+    print(f"{len(recordings)} recordings -> {data.paths.recordings}")
+    return 0
 
 
 def _plain(value: Any) -> Any:
@@ -43,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("config", help="print the fully resolved configuration as YAML")
+    commands.add_parser("recordings", help="index the raw dataset and save the recordings table")
     return parser
 
 
@@ -53,8 +77,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"pdeeg: {exc}", file=sys.stderr)
         return 2
-    if args.command == "config":
-        yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
+    if args.command == "recordings":
+        return _write_recordings(config)
+    yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
     return 0
 
 

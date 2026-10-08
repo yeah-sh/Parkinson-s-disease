@@ -29,6 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "edfio==0.4.18",  # lets mne-bids write the synthetic BDF dataset used by the tests
     "pytest==9.1.1",
     "ruff==0.16.10",
 ]

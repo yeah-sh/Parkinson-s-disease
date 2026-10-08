@@ -38,6 +38,7 @@ class DatasetConfig:
     datatype: str
     extension: str
     line_freq: float
+    montage: str
 
 
 @dataclass(frozen=True)
@@ -46,13 +47,21 @@ class PathsConfig:
     interim: Path
     processed: Path
     reports: Path
+    recordings: Path
+
+
+@dataclass(frozen=True)
+class SessionConfig:
+    group: str
+    condition: str
 
 
 @dataclass(frozen=True)
 class DataConfig:
     dataset: DatasetConfig
     paths: PathsConfig
-    sessions: dict[str, str]
+    sessions: dict[str, SessionConfig]
+    participants_rename: dict[str, str]
 
 
 # --- preprocessing.yaml ------------------------------------------------------------------------
@@ -84,8 +93,6 @@ class EpochsConfig:
 
 @dataclass(frozen=True)
 class PreprocessingConfig:
-    montage: str
-    drop_channels: tuple[str, ...]
     reference: str
     resample_sfreq: float | None
     filter: FilterConfig
@@ -273,7 +280,7 @@ def _load_yaml(path: Path) -> Any:
 
 def _validate(config: Config) -> None:
     """Checks that span more than one field or file."""
-    conditions = set(config.data.sessions.values())
+    conditions = {session.condition for session in config.data.sessions.values()}
     for name, task in config.model.tasks.items():
         unknown = sorted({*task.positive, *task.negative} - conditions)
         if unknown:

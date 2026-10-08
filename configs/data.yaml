@@ -7,17 +7,33 @@ dataset:
   task: rest
   datatype: eeg
   extension: .bdf
-  line_freq: 60.0     # Hz, from the BIDS sidecars
+  # Mains frequency in Hz. Use this, not the per-recording sidecar value: 9 of the 46 sidecars
+  # say 50, but no recording has a 50 Hz spectral peak and 37 have a clear one at 60.
+  line_freq: 60.0
+  montage: biosemi32  # MNE standard montage; also defines which channels are scalp EEG
 
 paths:
   raw: data/raw/ds002778
   interim: data/interim
   processed: data/processed
   reports: reports
+  recordings: data/interim/recordings.parquet  # one row per recording, written by `pdeeg recordings`
 
-# BIDS session label -> condition name used throughout the pipeline.
+# BIDS session label -> who was recorded and in which state. participants.tsv has no group
+# column, so the session label is what identifies patients and controls.
 # Keep "off" and "on" quoted: unquoted, YAML reads them as booleans.
 sessions:
-  hc: HC
-  "off": PD_OFF
-  "on": PD_ON
+  hc:
+    group: HC
+    condition: HC
+  "off":
+    group: PD
+    condition: PD_OFF
+  "on":
+    group: PD
+    condition: PD_ON
+
+# participants.tsv column -> name used in the recordings table.
+# The dataset calls the column "gender"; BIDS and the rest of this project call it "sex".
+participants_rename:
+  gender: sex

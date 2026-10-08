@@ -1,10 +1,8 @@
 # Raw recording -> clean epochs.
 # Provisional defaults, written before the preprocessing code exists; revisit when it lands.
 
-montage: biosemi32
-
-# EXG1-8 are external electrodes that channels.tsv labels as EEG; they are not scalp channels.
-drop_channels: [EXG1, EXG2, EXG3, EXG4, EXG5, EXG6, EXG7, EXG8]
+# Channel selection and the montage are handled when a recording is loaded
+# (pdeeg.data.bids.load_raw, configured in data.yaml), so they are not repeated here.
 
 # BioSemi recordings are reference-free and must be re-referenced offline.
 reference: average
