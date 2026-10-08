@@ -66,5 +66,4 @@ tests/          pytest tests
 notebooks/      exploratory notebooks that import pdeeg
 reports/        generated figures and tables
 data/           raw/, interim/, processed/ (contents git-ignored)
-legacy/         the original notebooks, kept for reference; see legacy/README.md
 ```

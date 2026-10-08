@@ -47,9 +47,6 @@ addopts = "-ra"
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
-# legacy/ holds the original notebooks, kept unchanged; ruff would otherwise lint them.
-# Do not add a bare "data" here: it would also exclude src/pdeeg/data/.
-extend-exclude = ["legacy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "PTH"]
