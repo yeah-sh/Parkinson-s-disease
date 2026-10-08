@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import types
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -68,36 +69,73 @@ class DataConfig:
 
 
 @dataclass(frozen=True)
+class CropConfig:
+    duration: float
+    start_event: str | None
+
+
+@dataclass(frozen=True)
+class LineNoiseConfig:
+    candidates: tuple[float, ...]
+    min_peak_ratio: float
+
+
+@dataclass(frozen=True)
 class FilterConfig:
-    l_freq: float | None
-    h_freq: float | None
-    notch_freqs: tuple[float, ...]
+    l_freq: float
+    h_freq: float
+    l_trans_bandwidth: float
+    h_trans_bandwidth: float
+    fir_window: str
+    phase: str
 
 
 @dataclass(frozen=True)
 class IcaConfig:
     method: str
     extended: bool
-    n_components: int | float | None
+    n_components: int | float | str
+    max_iter: int
     random_state: int
-    iclabel_exclude: tuple[str, ...]
-    iclabel_threshold: float
+    fit_l_freq: float
+    fit_h_freq: float
+    fit_notch: bool
+    exclude_labels: tuple[str, ...]
+    threshold: float
 
 
 @dataclass(frozen=True)
-class EpochsConfig:
-    duration: float
-    overlap: float
-    reject_peak_to_peak_uv: float | None
+class BadSegmentsConfig:
+    window: float
+    peak_to_peak_uv: float
+    flat_uv: float
+
+
+@dataclass(frozen=True)
+class OutputConfig:
+    dir: Path
+
+
+@dataclass(frozen=True)
+class QcConfig:
+    report: Path
+    figures_dir: Path
+    max_bad_percent: float
+    min_clean_stretch_s: float
+    outlier_z: float
 
 
 @dataclass(frozen=True)
 class PreprocessingConfig:
-    reference: str
-    resample_sfreq: float | None
+    crop: CropConfig
+    line_noise: LineNoiseConfig
     filter: FilterConfig
+    reference: str | tuple[str, ...]
     ica: IcaConfig
-    epochs: EpochsConfig
+    bad_segments: BadSegmentsConfig
+    output: OutputConfig
+    qc: QcConfig
+    n_jobs: int
 
 
 # --- features/mfdfa.yaml, features/psd.yaml ----------------------------------------------------
@@ -291,6 +329,16 @@ def _validate(config: Config) -> None:
     for band, (low, high) in config.psd.bands.items():
         if not low < high:
             raise ConfigError(f"psd.bands.{band}: lower edge {low} must be below upper edge {high}")
+    ica = config.preprocessing.ica
+    if isinstance(ica.n_components, str) and ica.n_components != "rank":
+        raise ConfigError(
+            f"preprocessing.ica.n_components: expected 'rank', an integer or a variance "
+            f"fraction, got {ica.n_components!r}"
+        )
+    if ica.method not in ("infomax", "picard"):
+        raise ConfigError(
+            f"preprocessing.ica.method: expected infomax or picard, got {ica.method!r}"
+        )
 
 
 def resolve_config_dir(config_dir: str | os.PathLike[str] | None = None) -> Path:
@@ -304,13 +352,25 @@ def resolve_config_dir(config_dir: str | os.PathLike[str] | None = None) -> Path
     return path
 
 
-def load_config(config_dir: str | os.PathLike[str] | None = None) -> Config:
-    """Load and validate every config file; relative paths come back absolute."""
+def load_config(
+    config_dir: str | os.PathLike[str] | None = None,
+    *,
+    overrides: Mapping[str, str | os.PathLike[str]] | None = None,
+) -> Config:
+    """Load and validate every config file; relative paths come back absolute.
+
+    ``overrides`` maps a section name (``"preprocessing"``, ...) to a YAML file to read for that
+    section instead of the one in the config directory.
+    """
     config_dir = resolve_config_dir(config_dir)
     root = config_dir.parent
+    overrides = dict(overrides or {})
+    unknown = sorted(set(overrides) - set(_SECTIONS))
+    if unknown:
+        raise ConfigError(f"no config section named {', '.join(unknown)}")
     sections = {}
     for name, (relpath, schema) in _SECTIONS.items():
-        path = config_dir / relpath
+        path = Path(overrides[name]).resolve() if name in overrides else config_dir / relpath
         raw = _load_yaml(path)
         try:
             sections[name] = _build(schema, raw, name, root)

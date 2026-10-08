@@ -1,28 +1,78 @@
-# Raw recording -> clean epochs.
-# Provisional defaults, written before the preprocessing code exists; revisit when it lands.
-
+# Raw recording -> one continuous, cleaned recording per session.
+# Nothing is cut into epochs and nothing is cut out: MFDFA needs continuous data, so bad
+# stretches are only marked.
+#
 # Channel selection and the montage are handled when a recording is loaded
 # (pdeeg.data.bids.load_raw, configured in data.yaml), so they are not repeated here.
 
+crop:
+  duration: 180.0       # seconds kept from every recording; shorter recordings are reported
+  # Trigger that marks where the kept window starts. 44 of the 46 recordings carry trigger "1"
+  # 2-29 s in (96 s for sub-pd6 ses-on) with at least 181 s after it; the dataset does not
+  # document it. Recordings without it start at the file start. null always starts there.
+  start_event: "1"
+
+# Mains frequency is estimated from each recording's spectrum and logged next to the sidecar
+# value and dataset.line_freq. A candidate counts as present when its spectral peak is at least
+# min_peak_ratio times the neighbouring spectrum.
+line_noise:
+  candidates: [50.0, 60.0]
+  min_peak_ratio: 3.0
+
+# Zero-phase FIR band-pass (firwin design) applied to the data that is kept.
+filter:
+  l_freq: 0.5           # Hz
+  h_freq: 50.0
+  l_trans_bandwidth: 0.5
+  # MNE's default here would be 12.5 Hz, which leaves 60 Hz mains inside the transition band.
+  # 5 Hz puts the stop band at 55 Hz.
+  h_trans_bandwidth: 5.0
+  fir_window: hamming
+  phase: zero
+
 # BioSemi recordings are reference-free and must be re-referenced offline.
+# "average", or a list of channel names.
 reference: average
 
-resample_sfreq: null  # Hz; null keeps the native 512 Hz
-
-filter:
-  l_freq: 1.0         # Hz; ICLabel expects 1-100 Hz band-passed data
-  h_freq: 100.0
-  notch_freqs: [60.0]
-
 ica:
-  method: infomax
-  extended: true      # extended infomax, as ICLabel was trained on
-  n_components: null  # null lets MNE choose from the data rank
+  method: infomax       # infomax, or picard if python-picard is installed
+  extended: true        # extended infomax, which ICLabel was trained with
+  # "rank" uses the data rank after re-referencing (31 for 32 average-referenced channels)
+  # rather than the channel count. An integer or a variance fraction also works.
+  n_components: rank
+  max_iter: 500
   random_state: 97
-  iclabel_exclude: [eye blink, muscle artifact, heart beat, line noise, channel noise]
-  iclabel_threshold: 0.8
+  # ICA is fitted on a separate copy filtered the way ICLabel expects (1-100 Hz) and then
+  # applied to the 0.5-50 Hz data. The copy is notched at dataset.line_freq: left in, mains
+  # noise took 7 of 31 components in a trial on sub-pd3 ses-off.
+  fit_l_freq: 1.0
+  fit_h_freq: 100.0
+  fit_notch: true
+  # A component is removed when ICLabel's most probable class is one of these and its
+  # probability is at least threshold.
+  exclude_labels: [eye blink, muscle artifact, heart beat, line noise]
+  threshold: 0.8
 
-epochs:
-  duration: 10.0      # seconds
-  overlap: 0.0        # seconds
-  reject_peak_to_peak_uv: null
+# Remaining artefacts are marked as BAD_peak / BAD_flat annotations on the cleaned data.
+# A window is bad when any channel's peak-to-peak amplitude in it is above peak_to_peak_uv or
+# below flat_uv.
+bad_segments:
+  window: 1.0           # seconds
+  peak_to_peak_uv: 150.0
+  flat_uv: 1.0
+
+output:
+  dir: data/interim/clean   # sub-XX_ses-YY_clean.fif and sub-XX_ses-YY_clean.json
+
+qc:
+  report: reports/qc_preprocessing.md
+  figures_dir: reports/figures/qc_preprocessing
+  # A recording is flagged when more than max_bad_percent of it is marked bad, when its
+  # longest stretch without a bad mark is shorter than min_clean_stretch_s (MFDFA needs
+  # uninterrupted data), or when a signal metric is more than outlier_z robust standard
+  # deviations (median and MAD across recordings) from the median.
+  max_bad_percent: 10.0
+  min_clean_stretch_s: 60.0
+  outlier_z: 3.0
+
+n_jobs: 6               # recordings processed in parallel; does not affect the results
