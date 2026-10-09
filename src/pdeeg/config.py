@@ -147,9 +147,12 @@ class MfdfaConfig:
     q_max: float
     q_step: float
     scale_min: int
-    scale_max: int
+    scale_max_frac: float
     n_scales: int
     detrend_order: int
+    fit_range: tuple[float, float] | None
+    min_variance_ratio: float
+    iaaft_max_iter: int
     features: tuple[str, ...]
 
 
@@ -329,6 +332,12 @@ def _validate(config: Config) -> None:
     for band, (low, high) in config.psd.bands.items():
         if not low < high:
             raise ConfigError(f"psd.bands.{band}: lower edge {low} must be below upper edge {high}")
+    mfdfa = config.mfdfa
+    if not mfdfa.q_min < mfdfa.q_max:
+        raise ConfigError(f"mfdfa: q_min {mfdfa.q_min} must be below q_max {mfdfa.q_max}")
+    if mfdfa.fit_range is not None and not mfdfa.fit_range[0] < mfdfa.fit_range[1]:
+        low, high = mfdfa.fit_range
+        raise ConfigError(f"mfdfa.fit_range: lower end {low} must be below upper end {high}")
     ica = config.preprocessing.ica
     if isinstance(ica.n_components, str) and ica.n_components != "rank":
         raise ConfigError(

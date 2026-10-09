@@ -1,19 +1,32 @@
-# Multifractal Detrended Fluctuation Analysis, per channel.
-# Provisional defaults, written before the feature code exists; revisit when it lands.
+# Multifractal Detrended Fluctuation Analysis (pdeeg.features.mfdfa), per channel.
 # Preprocessing delivers one continuous 180 s recording per session, not epochs.
+# The scale and fit-range values are generic defaults, validated on synthetic signals only;
+# revisit them when the EEG features are written.
 
 # Moment orders q, from q_min to q_max inclusive.
 q_min: -5.0
 q_max: 5.0
 q_step: 0.5
 
-# Window sizes in samples, log-spaced. These were chosen for 10 s segments at 512 Hz
-# (5120 samples), so that every scale has at least 10 windows; reconsider them for the
-# continuous recordings.
+# Window sizes: n_scales of them, log-spaced from scale_min samples to scale_max_frac of the
+# series length, rounded to integers. At 0.1 every scale has at least 10 windows from each end.
 scale_min: 16
-scale_max: 512
+scale_max_frac: 0.1
 n_scales: 20
 
 detrend_order: 1      # polynomial order removed from each window
 
-features: [hurst_q2, delta_h, alpha_peak, alpha_width, alpha_asymmetry]
+# Scales used to fit h(q): [low, high] in samples, both included, or null for all of them.
+fit_range: null
+
+# A window is discarded when its residual variance is at most this fraction of the median over
+# the windows of its scale. Flat windows would otherwise dominate the moments for negative q.
+min_variance_ratio: 1.0e-12
+
+# Most rounds an IAAFT surrogate (pdeeg.features.surrogates) may take; it stops sooner once a
+# round leaves the ordering of the values unchanged.
+iaaft_max_iter: 100
+
+# Entries of pdeeg.features.mfdfa.spectrum_features to use as features. It also returns
+# min_r2, the worst R² among the h(q) fits, which is a quality measure rather than a feature.
+features: [h2, delta_h, delta_alpha, alpha0, asymmetry]

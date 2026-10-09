@@ -4,8 +4,9 @@ Characterising and classifying Parkinson's disease (PD) from resting-state EEG: 
 controls, and PD off against on medication. The main features come from Multifractal Detrended
 Fluctuation Analysis (MFDFA); band power from the power spectrum is the baseline.
 
-**Status:** data access and preprocessing. Downloading, indexing, loading and cleaning the
-recordings work. The later stages (features, models, statistics, figures) are not written yet.
+**Status:** data access, preprocessing, and the MFDFA algorithm. Downloading, indexing, loading
+and cleaning the recordings work, and the MFDFA code is validated on synthetic signals. It is not
+yet applied to the EEG; the later stages (features, models, statistics, figures) are not written.
 
 ## Setup
 
@@ -82,6 +83,41 @@ same settings, so re-running after a change only redoes what the change affects.
 fixed in the configuration; re-running two recordings in a single process reproduced the
 six-worker run byte for byte.
 
+## MFDFA
+
+`pdeeg.features.mfdfa` implements multifractal detrended fluctuation analysis as in Kantelhardt et
+al., Physica A 316 (2002) 87-114. It takes any one-dimensional series:
+
+```python
+from pdeeg.features.mfdfa import make_qs, make_scales, mfdfa, spectrum_features
+
+qs = make_qs(-5.0, 5.0, 0.5)  # moment orders
+scales = make_scales(len(x), 16, 0.1, 20)  # 20 log-spaced window sizes, 16 samples to N / 10
+result = mfdfa(x, scales, qs, order=1)  # Fq, h, h_r2, tau, alpha, f_alpha
+features = spectrum_features(result, qs)  # h2, delta_h, delta_alpha, alpha0, asymmetry, min_r2
+```
+
+`pdeeg.features.surrogates` makes shuffled and IAAFT surrogates of a series, and
+`pdeeg.features.synthetic` the test signals with known exponents: fractional Gaussian noise and
+the binomial multiplicative cascade.
+
+`tests/test_mfdfa.py` and `notebooks/01_mfdfa_validation.ipynb` check the code against those
+signals and against the PyPI `MFDFA` package, which returns the same fluctuation functions to 11
+digits. With the values in `configs/features/mfdfa.yaml` and 65536 samples:
+
+- `h(2)` of a monofractal signal has a bias of 0.003 or less and a standard deviation of 0.01 to
+  0.02.
+- A monofractal signal still shows a spectrum width `delta_alpha` of 0.03 to 0.06 (0.12 for a
+  random walk), because the estimator widens the spectrum at finite length. Judge a width against
+  surrogates, not against zero.
+- For the binomial cascade the width is within 4 % of the exact 1.57. `h(q)` is up to 0.065 too
+  low, because the cascade reaches its scaling only at large scales and log-spaced windows
+  straddle its dyadic boxes; fitted from 256 samples on dyadic scales it is 0.011 low at every q.
+- Detrending of order m removes a polynomial trend of degree m from the profile, which is degree
+  m - 1 in the series itself.
+
+To re-run the notebook: `jupyter execute --inplace notebooks/01_mfdfa_validation.ipynb`.
+
 ## Configuration
 
 Every setting, including every path, lives in `configs/`. Nothing is hard-coded in the package.
@@ -90,7 +126,7 @@ Every setting, including every path, lives in `configs/`. Nothing is hard-coded 
 |---|---|
 | `configs/data.yaml` | Dataset identity and montage, data and report paths, what each session label means |
 | `configs/preprocessing.yaml` | Cropping, filtering, referencing, ICA, bad-stretch marking, QC limits |
-| `configs/features/mfdfa.yaml` | MFDFA moment orders, scales, detrending |
+| `configs/features/mfdfa.yaml` | MFDFA moment orders, scales, detrending, fit range, surrogates |
 | `configs/features/psd.yaml` | Spectral estimation and frequency bands |
 | `configs/model.yaml` | Classification tasks, cross-validation, experiment tracking |
 
