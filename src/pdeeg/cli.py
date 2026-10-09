@@ -74,6 +74,98 @@ def _preprocess(config: Config, n_jobs: int | None, force: bool) -> int:
     return 0 if set(counts) <= {"processed", "cached"} else 1
 
 
+def _mfdfa_scaling(config: Config, n_jobs: int | None) -> int:
+    import pandas as pd
+
+    from pdeeg.features.scaling import run_inspection
+    from pdeeg.features.scaling_report import write_report
+
+    table = config.data.paths.recordings
+    if not table.is_file():
+        print(f"pdeeg: {table} not found; run `pdeeg recordings` first", file=sys.stderr)
+        return 1
+    # Only what is needed to find the cleaned files: the group labels are never loaded.
+    recordings = pd.read_parquet(table, columns=["subject", "session"])
+    inspection = run_inspection(config, recordings, n_jobs=n_jobs)
+    print(f"Scaling report -> {write_report(config, inspection, len(recordings))}")
+    return 0
+
+
+def _read_recordings(config: Config):
+    import pandas as pd
+
+    table = config.data.paths.recordings
+    if not table.is_file():
+        print(f"pdeeg: {table} not found; run `pdeeg recordings` first", file=sys.stderr)
+        return None
+    return pd.read_parquet(table)
+
+
+def _psd_table(config: Config, recordings, n_jobs: int):
+    """Build and write the band-power tables; returns the long one."""
+    from pdeeg.features.psd import build_psd_table
+    from pdeeg.features.tables import psd_wide, write_tables
+
+    long = build_psd_table(config, recordings, n_jobs=n_jobs)
+    paths = write_tables(config, "psd", long, psd_wide(long))
+    print(f"Band-power features: {len(long)} values -> {paths['long']}")
+    print(f"Wide table -> {paths['wide']}")
+    return long
+
+
+def _psd_features(config: Config, n_jobs: int) -> int:
+    recordings = _read_recordings(config)
+    if recordings is None:
+        return 1
+    _psd_table(config, recordings, n_jobs)
+    return 0
+
+
+def _mfdfa_features(config: Config, n_jobs: int | None, force: bool) -> int:
+    import pandas as pd
+
+    from pdeeg.features.extract import run
+    from pdeeg.features.report import write_report
+    from pdeeg.features.tables import (
+        build_mfdfa_table,
+        mfdfa_wide,
+        table_paths,
+        write_tables,
+    )
+
+    recordings = _read_recordings(config)
+    if recordings is None:
+        return 1
+
+    def show(result: dict[str, Any]) -> None:
+        detail = result["detail"].strip().splitlines()
+        print(
+            f"sub-{result['subject']} ses-{result['session']}: {result['status']} "
+            f"({result['seconds']} s)" + (f" - {detail[0]}" if detail else ""),
+            flush=True,
+        )
+
+    results = run(config, recordings, n_jobs=n_jobs, force=force, progress=show)
+    counts = Counter(result["status"] for result in results)
+    print(", ".join(f"{count} {status}" for status, count in counts.items()))
+    if not set(counts) <= {"processed", "cached"}:
+        for result in results:
+            if result["status"] == "failed":
+                print(f"\nsub-{result['subject']} ses-{result['session']}:", file=sys.stderr)
+                print(result["detail"], file=sys.stderr)
+        return 1
+
+    long = build_mfdfa_table(config, recordings)
+    paths = write_tables(config, "mfdfa", long, mfdfa_wide(long, config.mfdfa))
+    print(f"MFDFA features: {len(long)} values -> {paths['long']}")
+    print(f"Wide table -> {paths['wide']}")
+    # The QC report sets the band powers next to the MFDFA features when they exist.
+    psd_path = table_paths(config, "psd")["long"]
+    psd = pd.read_parquet(psd_path) if psd_path.is_file() else None
+    print(f"QC report -> {write_report(config, recordings, long, psd)}")
+    return 0
+
+
 def _plain(value: Any) -> Any:
     """Reduce ``dataclasses.asdict`` output to types YAML can serialise."""
     if isinstance(value, dict):
@@ -119,6 +211,33 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.add_argument(
         "--force", action="store_true", help="redo recordings whose outputs are up to date"
     )
+    features = commands.add_parser(
+        "mfdfa-features",
+        help="MFDFA features with surrogates for every recording, and their QC report",
+    )
+    features.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="channels to analyse in parallel (default: extraction.n_jobs in the MFDFA config)",
+    )
+    features.add_argument(
+        "--force", action="store_true", help="redo recordings whose stored runs are up to date"
+    )
+    psd = commands.add_parser("psd-features", help="band-power features for every recording")
+    psd.add_argument(
+        "--n-jobs", type=int, default=1, help="recordings to analyse in parallel (default: 1)"
+    )
+    scaling = commands.add_parser(
+        "mfdfa-scaling",
+        help="plot the scaling of a few recordings, without their labels, to choose fit ranges",
+    )
+    scaling.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="processes to use (default: inspection.n_jobs in the MFDFA config)",
+    )
     return parser
 
 
@@ -137,6 +256,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _write_recordings(config)
     if args.command == "preprocess":
         return _preprocess(config, args.n_jobs, args.force)
+    if args.command == "mfdfa-scaling":
+        return _mfdfa_scaling(config, args.n_jobs)
+    if args.command == "mfdfa-features":
+        return _mfdfa_features(config, args.n_jobs, args.force)
+    if args.command == "psd-features":
+        return _psd_features(config, args.n_jobs)
     yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
     return 0
 

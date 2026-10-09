@@ -37,3 +37,14 @@ sessions:
 # The dataset calls the column "gender"; BIDS and the rest of this project call it "sex".
 participants_rename:
   gender: sex
+
+# Scalp regions of the biosemi32 montage, for region-averaged features: a region's value is the
+# mean of its channels' values. Every channel is in exactly one region. The lateral row (FC5/6,
+# T7/8, CP5/6) is "temporal": T7 and T8 alone would be a two-channel average of the channels
+# most exposed to muscle. P7 and P8 (T5 and T6 in the older naming) are counted as parietal.
+regions:
+  frontal: [Fp1, Fp2, AF3, AF4, F7, F3, Fz, F4, F8]
+  central: [FC1, FC2, C3, Cz, C4, CP1, CP2]
+  temporal: [FC5, FC6, T7, T8, CP5, CP6]
+  parietal: [P7, P3, Pz, P4, P8]
+  occipital: [PO3, PO4, O1, Oz, O2]

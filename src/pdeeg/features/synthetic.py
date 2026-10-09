@@ -30,6 +30,22 @@ def fgn(n_samples: int, hurst: float, rng: np.random.Generator) -> np.ndarray:
     return np.fft.fft(np.sqrt(eigenvalues / size) * noise).real[:n_samples]
 
 
+def power_law_noise(n_samples: int, beta: float, rng: np.random.Generator) -> np.ndarray:
+    """Gaussian noise whose power spectrum falls as ``1 / f ** beta``, with unit variance.
+
+    White noise shaped in the frequency domain: ``beta = 0`` leaves it white, 1 makes it pink
+    and 2 brown. Unlike :func:`fgn` it is not confined to stationary series, and its exponent
+    is ``h(2) = (beta + 1) / 2`` as long as the detrending order is above ``(beta - 1) / 2``.
+    """
+    if n_samples < 2:
+        raise ValueError(f"n_samples must be at least 2, got {n_samples}")
+    freqs = np.fft.rfftfreq(n_samples)
+    shape = np.zeros(freqs.size)
+    shape[1:] = freqs[1:] ** (-beta / 2.0)
+    series = np.fft.irfft(np.fft.rfft(rng.standard_normal(n_samples)) * shape, n_samples)
+    return series / series.std()
+
+
 def binomial_cascade(n_levels: int, a: float) -> np.ndarray:
     """Binomial multiplicative cascade of length ``2 ** n_levels`` (Kantelhardt et al., eq. 18).
 

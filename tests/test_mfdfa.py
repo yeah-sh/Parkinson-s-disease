@@ -32,11 +32,13 @@ from pdeeg.config import load_config
 from pdeeg.features.mfdfa import (
     FEATURE_NAMES,
     MfdfaResult,
+    TooFewScales,
     make_qs,
     make_scales,
     mfdfa,
     spectrum_features,
 )
+from pdeeg.features.scaling import scales_in_range
 from pdeeg.features.synthetic import binomial_cascade, binomial_cascade_spectrum, fgn
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
@@ -317,6 +319,104 @@ def test_flat_windows_are_discarded():
     np.testing.assert_allclose(result.h, expected.h, atol=1e-9)
 
 
+# --- excluded stretches ------------------------------------------------------------------------
+
+
+def test_excluded_stretch_leaves_the_result_as_if_it_had_been_cut_out():
+    """Windows that lie entirely outside an excluded stretch are those of the series without it.
+
+    The stretch and the series are whole numbers of the largest window, so every window is
+    either inside or outside, counted from either end. With order 1 a window's residual does
+    not depend on where the profile stood when the window began, so cutting the stretch out
+    changes nothing in the windows that remain. The stretch holds an artefact a thousand times
+    the size of the signal.
+    """
+    x = np.random.default_rng(4).standard_normal(4096)
+    exclude = np.zeros(x.size, dtype=bool)
+    exclude[1024:1536] = True
+    spoiled = x.copy()
+    spoiled[exclude] = 1000.0 * np.random.default_rng(5).standard_normal(512) + 500.0
+    scales = np.array([16, 32, 64, 128])
+
+    result = mfdfa(spoiled, scales, QS, exclude=exclude)
+    expected = mfdfa(np.delete(x, np.s_[1024:1536]), scales, QS)
+
+    np.testing.assert_array_equal(result.n_windows, 2 * (3584 // scales))
+    np.testing.assert_allclose(result.Fq, expected.Fq, rtol=1e-9)
+    np.testing.assert_allclose(result.h, expected.h, atol=1e-9)
+    assert result.fitted.all()
+    # Without the mask the artefact takes over: Fq for q = 2 is more than 100 times larger.
+    assert np.all(mfdfa(spoiled, scales, QS).Fq[QS == 2.0] > 100.0 * expected.Fq[QS == 2.0])
+
+
+def test_every_window_that_touches_an_excluded_sample_is_dropped_and_no_other():
+    x = np.random.default_rng(6).standard_normal(1000)
+    exclude = np.zeros(x.size, dtype=bool)
+    exclude[[130, 131, 700]] = True
+    scales = np.array([8, 13, 50, 100])
+    qs = np.array([-3.0, 0.0, 2.0])
+
+    result = mfdfa(x, scales, qs, exclude=exclude)
+
+    profile = np.cumsum(np.where(exclude, x[~exclude].mean(), x) - x[~exclude].mean())
+    for j, s in enumerate(scales):
+        n = x.size // s
+        starts = [v * s for v in range(n)] + [x.size - (v + 1) * s for v in range(n)]
+        kept = [start for start in starts if not exclude[start : start + s].any()]
+        time = np.arange(s)
+        f2 = []
+        for start in kept:
+            window = profile[start : start + s]
+            f2.append(np.mean((window - np.polyval(np.polyfit(time, window, 1), time)) ** 2))
+        f2 = np.array(f2)
+        assert result.n_windows[j] == len(kept) < 2 * n
+        expected = [
+            np.exp(0.5 * np.mean(np.log(f2))) if q == 0 else np.mean(f2 ** (q / 2)) ** (1 / q)
+            for q in qs
+        ]
+        np.testing.assert_allclose(result.Fq[:, j], expected, rtol=1e-9)
+
+
+def test_values_of_excluded_samples_do_not_matter_and_an_empty_mask_changes_nothing():
+    x = np.random.default_rng(7).standard_normal(8192)
+    scales = default_scales(x.size)
+    exclude = np.zeros(x.size, dtype=bool)
+    exclude[3000:3400] = True
+    other = x.copy()
+    other[exclude] = 1.0e6
+
+    first = mfdfa(x, scales, QS, exclude=exclude)
+    second = mfdfa(other, scales, QS, exclude=exclude)
+    plain = mfdfa(x, scales, QS)
+    unmasked = mfdfa(x, scales, QS, exclude=np.zeros(x.size, dtype=bool))
+
+    np.testing.assert_allclose(second.Fq, first.Fq, rtol=1e-9)
+    np.testing.assert_array_equal(unmasked.Fq, plain.Fq)
+    np.testing.assert_array_equal(unmasked.h, plain.h)
+    assert np.all(first.n_windows < plain.n_windows)
+
+
+def test_scales_with_too_few_windows_are_left_out_of_the_fit():
+    x = np.random.default_rng(8).standard_normal(4096)
+    scales = np.array([16, 32, 64, 128, 256, 512])
+    # Bad samples 300 apart leave no window of 512 samples and few of 256.
+    exclude = np.zeros(x.size, dtype=bool)
+    exclude[150::300] = True
+
+    result = mfdfa(x, scales, QS, exclude=exclude, min_windows=8)
+
+    assert result.n_windows[-1] == 0 and np.isnan(result.Fq[:, -1]).all()
+    assert 0 < result.n_windows[-2] < 8
+    np.testing.assert_array_equal(result.fitted, [True, True, True, True, False, False])
+    expected = mfdfa(x, scales[:4], QS, exclude=exclude)
+    np.testing.assert_allclose(result.h, expected.h, atol=1e-12)
+    # Asked for more windows than any scale but the three smallest has: still a fit.
+    few = mfdfa(x, scales, QS, exclude=exclude, min_windows=int(result.n_windows[2]))
+    assert few.fitted.sum() == 3
+    with pytest.raises(TooFewScales, match="left to fit"):
+        mfdfa(x, scales, QS, exclude=exclude, min_windows=int(result.n_windows[2]) + 1)
+
+
 def test_constant_series_is_rejected():
     with pytest.raises(ValueError, match="scale"):
         mfdfa(np.full(2048, 3.0), default_scales(2048), QS)
@@ -345,6 +445,10 @@ def test_fewer_than_three_moment_orders_give_exponents_without_a_spectrum():
         ({"order": -1}, "order"),
         ({"fit_range": (16, 40)}, "left to fit"),
         ({"min_variance_ratio": -1.0}, "min_variance_ratio"),
+        ({"min_windows": 0}, "min_windows"),
+        ({"exclude": np.zeros(499, dtype=bool)}, "one entry per sample"),
+        ({"exclude": np.zeros(500)}, "boolean"),
+        ({"exclude": np.ones(500, dtype=bool)}, "leaves no sample"),
     ],
 )
 def test_invalid_arguments_are_rejected(kwargs, message):
@@ -409,6 +513,7 @@ def test_spectrum_features_of_a_known_spectrum():
         f_alpha=np.array([0.2, 0.7, 1.0, 0.8, 0.1]),
         intercept=nan,
         n_windows=np.empty(0, dtype=int),
+        fitted=np.empty(0, dtype=bool),
     )
 
     features = spectrum_features(result, qs)
@@ -431,17 +536,22 @@ def test_configured_parameters_run_end_to_end():
     config = load_config(CONFIG_DIR).mfdfa
     x = np.random.default_rng(8).standard_normal(8192)
     qs = make_qs(config.q_min, config.q_max, config.q_step)
-    scales = make_scales(x.size, config.scale_min, config.scale_max_frac, config.n_scales)
 
-    result = mfdfa(
-        x,
-        scales,
-        qs,
-        order=config.detrend_order,
-        fit_range=config.fit_range,
-        min_variance_ratio=config.min_variance_ratio,
-    )
-    features = spectrum_features(result, qs)
+    for fit_range in config.broadband.fit_ranges.values():
+        scales = scales_in_range(
+            fit_range,
+            512.0,
+            config.scales_per_range,
+            max_scale=int(x.size * config.scale_max_frac),
+        )
+        result = mfdfa(
+            x,
+            scales,
+            qs,
+            order=config.detrend_order,
+            min_variance_ratio=config.min_variance_ratio,
+        )
+        features = spectrum_features(result, qs)
 
-    assert set(config.features) <= set(features)
-    assert all(np.isfinite(value) for value in features.values())
+        assert set(config.features) <= set(features)
+        assert all(np.isfinite(value) for value in features.values())

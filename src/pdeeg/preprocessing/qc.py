@@ -1,44 +1,34 @@
-"""QC figures for the preprocessing stage.
-
-Figures are built with matplotlib's object interface and saved as PNG; nothing here opens a
-window or changes the global matplotlib state.
-"""
+"""QC figures for the preprocessing stage, in the shared style of :mod:`pdeeg.viz.style`."""
 
 from __future__ import annotations
 
-import functools
 import math
-from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-import matplotlib
 import mne
 import numpy as np
 import pandas as pd
-from matplotlib import font_manager
 from matplotlib.axes import Axes
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch, Patch, Rectangle
 from mne.preprocessing import ICA
 
 from pdeeg.config import PreprocessingConfig
+from pdeeg.viz.style import (
+    ACCENT,
+    CONTEXT,
+    HEADER,
+    INK,
+    INK_SECONDARY,
+    MUTED,
+    PX,
+    SURFACE,
+    new_figure,
+    styled,
+)
 
-DPI = 150
-_PX = DPI / 96  # device pixels per CSS pixel; mark sizes below are given in CSS pixels
-
-# Chart chrome and ink.
-SURFACE = "#fcfcfb"
-INK = "#0b0b0b"
-INK_SECONDARY = "#52514e"
-MUTED = "#898781"
-GRID = "#e1e0d9"
-AXIS = "#c3c2b7"
-# One accent for the series a chart is about; grey for context.
-ACCENT = "#2a78d6"
-CONTEXT = "#c3c2b7"
 # One fixed colour per ICLabel artefact class, so a class looks the same in every figure.
 CLASS_COLORS = {
     "eye blink": "#2a78d6",
@@ -49,44 +39,9 @@ CLASS_COLORS = {
     "other": "#008300",
 }
 
-_BAR_MAX_THICKNESS = 24 * _PX
-_BAR_RADIUS = 4 * _PX
-_BAR_GAP = 2 * _PX
-_FONTS = ("Segoe UI", "Helvetica Neue", "Arial", "DejaVu Sans")
-# Inches reserved at the top of every figure for its title and subtitle.
-_HEADER = 0.58
-_MARGIN = 0.1
-
-
-@functools.cache
-def _rc() -> dict[str, Any]:
-    installed = {font.name for font in font_manager.fontManager.ttflist}
-    family = next((name for name in _FONTS if name in installed), "sans-serif")
-    return {
-        "font.family": family,
-        "font.size": 9,
-        "text.color": INK,
-        "figure.facecolor": SURFACE,
-        "savefig.facecolor": SURFACE,
-        "axes.facecolor": SURFACE,
-        "axes.edgecolor": AXIS,
-        "axes.linewidth": 0.8,
-        "axes.labelcolor": INK_SECONDARY,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "axes.axisbelow": True,
-        "axes.grid": True,
-        "grid.color": GRID,
-        "grid.linewidth": 0.8,
-        "xtick.color": AXIS,
-        "ytick.color": AXIS,
-        "xtick.labelcolor": INK_SECONDARY,
-        "ytick.labelcolor": INK_SECONDARY,
-        "lines.linewidth": 1.5,
-        "lines.solid_capstyle": "round",
-        "lines.solid_joinstyle": "round",
-        "legend.frameon": False,
-    }
+_BAR_MAX_THICKNESS = 24 * PX
+_BAR_RADIUS = 4 * PX
+_BAR_GAP = 2 * PX
 
 
 def count_column(label: str) -> str:
@@ -94,35 +49,10 @@ def count_column(label: str) -> str:
     return "n_" + label.replace(" ", "_")
 
 
-def _styled(plot: Callable[..., Figure]) -> Callable[..., Figure]:
-    @functools.wraps(plot)
-    def wrapper(*args: Any, **kwargs: Any) -> Figure:
-        with matplotlib.rc_context(_rc()):
-            return plot(*args, **kwargs)
-
-    return wrapper
-
-
-def _figure(width: float, height: float, title: str, subtitle: str) -> Figure:
-    """A figure with its title block; the plots are laid out in the space below it."""
-    figure = Figure(figsize=(width, height), dpi=DPI, layout="constrained")
-    FigureCanvasAgg(figure)
-    figure.get_layout_engine().set(rect=(0.0, 0.0, 1.0, 1.0 - _HEADER / height))
-    x = _MARGIN / width
-    figure.text(x, 1 - 0.1 / height, title, ha="left", va="top", fontsize=11, fontweight="bold")
-    figure.text(x, 1 - 0.33 / height, subtitle, ha="left", va="top", color=INK_SECONDARY)
-    return figure
-
-
-def save(figure: Figure, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(path, dpi=DPI)
-
-
 # --- one recording ------------------------------------------------------------------------------
 
 
-@_styled
+@styled
 def plot_psd(log: Mapping[str, Any], config: PreprocessingConfig, title: str) -> Figure:
     """Spectrum of one recording before and after cleaning, from its log."""
     freqs = np.asarray(log["psd"]["freqs_hz"])
@@ -133,7 +63,7 @@ def plot_psd(log: Mapping[str, Any], config: PreprocessingConfig, title: str) ->
 
     line = log["line_noise"]
     mains = "none detected" if line["detected_hz"] is None else f"{line['detected_hz']:g} Hz"
-    figure = _figure(
+    figure = new_figure(
         7.0,
         3.9,
         f"{title}: power spectrum before and after cleaning",
@@ -168,7 +98,7 @@ def plot_psd(log: Mapping[str, Any], config: PreprocessingConfig, title: str) ->
     return figure
 
 
-@_styled
+@styled
 def plot_removed_components(
     ica: ICA, info: mne.Info, removed: Sequence[Mapping[str, Any]], title: str
 ) -> Figure:
@@ -176,9 +106,9 @@ def plot_removed_components(
     n_cols = min(len(removed), 6)
     n_rows = math.ceil(len(removed) / n_cols)
     count = f"{len(removed)} ICA component{'s' if len(removed) != 1 else ''} removed"
-    figure = _figure(
+    figure = new_figure(
         max(1.6 * n_cols, 6.0),
-        1.95 * n_rows + _HEADER + 0.1,
+        1.95 * n_rows + HEADER + 0.1,
         f"{title}: {count}",
         f"Of {ica.n_components_}. Each map is titled with ICLabel's class and its probability.",
     )
@@ -272,7 +202,7 @@ def _draw_bars(axes: Axes, table: pd.DataFrame, columns: Mapping[str, str], fmt:
             )
 
 
-@_styled
+@styled
 def plot_overview(table: pd.DataFrame, config: PreprocessingConfig) -> Figure:
     """Bad time, longest clean stretch and ICA components removed, one row per recording.
 
@@ -301,9 +231,9 @@ def plot_overview(table: pd.DataFrame, config: PreprocessingConfig) -> Figure:
         ),
         (classes, "ICA components removed", "components", ".0f", 0.0),
     )
-    figure = _figure(
+    figure = new_figure(
         11.0,
-        0.205 * len(table) + _HEADER + 1.3,
+        0.205 * len(table) + HEADER + 1.3,
         f"Preprocessing QC: {len(table)} recordings",
         "Flagged recordings are in bold and carry their value.",
     )
@@ -338,7 +268,7 @@ def plot_overview(table: pd.DataFrame, config: PreprocessingConfig) -> Figure:
     return figure
 
 
-@_styled
+@styled
 def plot_psd_overview(
     freqs: np.ndarray,
     before: np.ndarray,
@@ -351,7 +281,7 @@ def plot_psd_overview(
     ``before`` and ``after`` are recordings x frequencies in dB; ``flagged`` is one boolean per
     recording.
     """
-    figure = _figure(
+    figure = new_figure(
         11.0,
         4.3,
         f"Power spectra of all {len(before)} recordings",

@@ -4,9 +4,11 @@ Characterising and classifying Parkinson's disease (PD) from resting-state EEG: 
 controls, and PD off against on medication. The main features come from Multifractal Detrended
 Fluctuation Analysis (MFDFA); band power from the power spectrum is the baseline.
 
-**Status:** data access, preprocessing, and the MFDFA algorithm. Downloading, indexing, loading
-and cleaning the recordings work, and the MFDFA code is validated on synthetic signals. It is not
-yet applied to the EEG; the later stages (features, models, statistics, figures) are not written.
+**Status:** data access, preprocessing, the MFDFA algorithm, and the features. Downloading,
+indexing, loading and cleaning the recordings work; the MFDFA code is validated on synthetic
+signals; the fit ranges were chosen without sight of the group labels; and MFDFA features with
+surrogates and band-power features are extracted for every recording, with a QC report. The later
+stages (models, statistics) are not written, and nothing has been compared between groups.
 
 ## Setup
 
@@ -118,15 +120,89 @@ digits. With the values in `configs/features/mfdfa.yaml` and 65536 samples:
 
 To re-run the notebook: `jupyter execute --inplace notebooks/01_mfdfa_validation.ipynb`.
 
+### Where the EEG scales
+
+MFDFA is run on two kinds of series per channel: the cleaned EEG itself ("broadband"), and the
+Hilbert amplitude envelope of the EEG band-passed to theta, alpha or beta
+(`pdeeg.features.envelope`). Before any exponent is fitted,
+
+```
+pdeeg mfdfa-scaling                 # also takes --n-jobs N
+```
+
+plots `log Fq(s)` against `log s` and its local slope for 8 recordings picked at random, next to
+noise put through the same filters, and writes `reports/mfdfa_scaling.md`. The recordings appear
+as R1 to R8: the command does not load the group labels, so the fit ranges read from the report
+cannot be tuned towards a group difference. The ranges and the reasons for them are in
+`configs/features/mfdfa.yaml`. In short:
+
+- **Broadband** has no single scaling regime. The 50 Hz low-pass bends it below about 0.05 s, the
+  alpha rhythm between 0.09 and 0.4 s, and the 0.5 Hz high-pass above about 1 s. Two short ranges
+  are left, 0.045-0.09 s and 0.3-1 s. On the first, filtered monofractal noise is as "multifractal"
+  as the EEG, so only `h2` means anything there.
+- **Envelopes** are fitted from 2 s to a tenth of the series (17.8 s). Below 2 s the band-pass
+  filter alone gives the envelope of white noise a memory.
+
+## Features
+
+```
+pdeeg mfdfa-features                # also takes --n-jobs N and --force
+pdeeg psd-features                  # also takes --n-jobs N
+```
+
+`pdeeg mfdfa-features` runs MFDFA on every channel of every recording, for each series (the
+broadband EEG and the theta, alpha and beta envelopes) and each fit range, and writes
+
+- `data/processed/mfdfa_features_ds002778-1.0.5.parquet`: the long table, one value per row, with
+  the columns `subject`, `session`, `group`, `level` (`channel` or `region`), `name` (the channel
+  or region), `variant` (`broadband` or `envelope`), `band`, `fit_range`, `segments`, `feature` and
+  `value`;
+- `data/processed/mfdfa_features_ds002778-1.0.5_wide.parquet`: one row per recording and
+  `segments`, one column per feature, named `<series>_<fit range>_<feature>_<channel or region>`,
+  for modelling. It holds the features listed under `wide_features` in the configuration: all
+  five for the long broadband range and the envelopes, `h2` alone for the short broadband range;
+- `reports/qc_mfdfa.md`: the QC report.
+
+What the long table holds for each channel, series and fit range:
+
+| `feature` | What it is |
+|---|---|
+| `h2`, `delta_h`, `delta_alpha`, `alpha0`, `asymmetry` | The MFDFA features (`pdeeg.features.mfdfa.spectrum_features`) |
+| `min_r2` | Worst R² of the h(q) fits: a quality measure, not a feature |
+| `n_scales` | Scales the fit used: 12, or fewer when bad stretches left too few windows |
+| `delta_alpha_iaaft_mean`, `_sd` | Mean and standard deviation of `delta_alpha` over 20 IAAFT surrogates |
+| `delta_alpha_iaaft_z` | (`delta_alpha` - that mean) / that standard deviation |
+| `delta_alpha_iaaft_p` | Share of the surrogates, the original counted in, at least as wide as the original; 1/21 when it is wider than all 20 |
+| `h2_iaaft_mean` | Mean `h2` of the surrogates, which should equal `h2`: a check on the surrogates |
+| `..._shuffle_...` | The same five for 20 shuffled surrogates |
+
+Three things about these tables:
+
+- **`segments`.** Every feature is computed on the whole recording (`full`) and again without
+  the windows that touch a stretch annotated bad (`clean`). Windows are dropped where they stand;
+  data is never cut out and joined. Surrogates are made from the whole series, so their rows are
+  `full` only. For the 22 recordings without a bad stretch the two are equal.
+- **Regions.** A region's value is the mean of its channels' values. The five regions (frontal,
+  central, temporal, parietal, occipital) are defined in `configs/data.yaml`.
+- **Runtime.** The surrogates take most of the time: 117,760 IAAFT surrogates of 92,160 samples,
+  about 5 minutes per recording on 18 processes. Every MFDFA run is stored per recording in
+  `data/interim/mfdfa/`, a recording is skipped when its stored runs are current, and the tables
+  are rebuilt from the stored runs in seconds.
+
+`pdeeg psd-features` writes the baseline, `data/processed/psd_features_ds002778-1.0.5.parquet`
+(long, with `band` in place of the MFDFA columns) and its `_wide` companion: log10 relative band
+power from the Welch spectrum, delta to gamma, per channel and region, again `full` and `clean`.
+Run it before `pdeeg mfdfa-features` to have the band powers included in the QC report.
+
 ## Configuration
 
 Every setting, including every path, lives in `configs/`. Nothing is hard-coded in the package.
 
 | File | Covers |
 |---|---|
-| `configs/data.yaml` | Dataset identity and montage, data and report paths, what each session label means |
+| `configs/data.yaml` | Dataset identity and montage, data and report paths, what each session label means, scalp regions |
 | `configs/preprocessing.yaml` | Cropping, filtering, referencing, ICA, bad-stretch marking, QC limits |
-| `configs/features/mfdfa.yaml` | MFDFA moment orders, scales, detrending, fit range, surrogates |
+| `configs/features/mfdfa.yaml` | MFDFA moment orders, detrending, envelope bands, fit ranges and why, bad stretches, surrogates, outputs, the scaling inspection |
 | `configs/features/psd.yaml` | Spectral estimation and frequency bands |
 | `configs/model.yaml` | Classification tasks, cross-validation, experiment tracking |
 

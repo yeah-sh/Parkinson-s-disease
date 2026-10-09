@@ -12,6 +12,10 @@ series", Physica A 316 (2002) 87-114:
 5. ``h(q)`` is the slope of ``log Fq(s)`` against ``log s``.
 6. ``tau(q) = q h(q) - 1``, ``alpha = d tau / dq`` and ``f(alpha) = q alpha - tau``.
 
+Stretches of the series can be excluded. Their samples add nothing to the profile, and every
+window that touches one is dropped at every scale; the windows that are left are the ones the
+whole series would have had there, so nothing is cut out and joined.
+
 Nothing in this module knows about EEG or about the configuration: every parameter is an
 argument, and ``configs/features/mfdfa.yaml`` holds the values the project uses.
 """
@@ -31,13 +35,18 @@ FEATURE_NAMES = ("h2", "delta_h", "delta_alpha", "alpha0", "asymmetry", "min_r2"
 MIN_FIT_SCALES = 3
 
 
+class TooFewScales(ValueError):
+    """Fewer scales than a fit of ``h(q)`` needs are left once the unusable ones are set aside."""
+
+
 @dataclass(frozen=True)
 class MfdfaResult:
     """What :func:`mfdfa` returns, for ``n_q`` moment orders and ``n_scales`` scales.
 
     ``Fq`` has shape (n_q, n_scales): row ``i`` is the fluctuation function of ``qs[i]``. It is
     NaN at a scale where every window was discarded. ``n_windows``, shape (n_scales,), is the
-    number of windows kept at each scale. Everything else has shape (n_q,): the generalised
+    number of windows kept at each scale, and ``fitted``, a boolean array of the same shape,
+    marks the scales ``h(q)`` was fitted on. Everything else has shape (n_q,): the generalised
     Hurst exponent ``h``, the R² of the fit that gave it (``h_r2``), the ``intercept`` of that
     fit (``log Fq = intercept + h log s``, natural logarithms), the scaling exponent ``tau``,
     and the singularity spectrum as the pair ``alpha``, ``f_alpha``.
@@ -51,6 +60,7 @@ class MfdfaResult:
     f_alpha: np.ndarray
     intercept: np.ndarray
     n_windows: np.ndarray
+    fitted: np.ndarray
 
 
 def make_qs(q_min: float, q_max: float, q_step: float) -> np.ndarray:
@@ -114,6 +124,13 @@ def _as_scales(scales: ArrayLike, order: int, n_samples: int) -> np.ndarray:
     return scales
 
 
+def _window_starts(n_samples: int, scale: int) -> np.ndarray:
+    """First sample of every window of ``scale`` samples, in the order of _window_variances."""
+    n_windows = n_samples // scale
+    from_start = np.arange(n_windows) * scale
+    return np.concatenate([from_start, n_samples - n_windows * scale + from_start])
+
+
 def _window_variances(profile: np.ndarray, scale: int, order: int) -> np.ndarray:
     """Residual variance ``F²(v, s)`` of a polynomial fit in each window of ``scale`` samples.
 
@@ -169,6 +186,8 @@ def mfdfa(
     fit_range: tuple[float, float] | None = None,
     *,
     min_variance_ratio: float = 1e-12,
+    exclude: ArrayLike | None = None,
+    min_windows: int = 1,
 ) -> MfdfaResult:
     """MFDFA of the series ``x`` at the window sizes ``scales`` and moment orders ``qs``.
 
@@ -177,10 +196,17 @@ def mfdfa(
     fitted over the scales inside ``fit_range``, a (low, high) pair in samples with both ends
     included, or over all of them when it is None.
 
+    ``exclude`` marks samples to leave out, one boolean per sample of ``x``. A window holding
+    any of them is dropped and the others are untouched: the windows keep their places, and
+    the values of the excluded samples do not enter the result in any way (they are replaced by
+    the mean of the rest before the profile is formed).
+
     A window whose residual variance is zero, or no more than ``min_variance_ratio`` times the
     median over the windows of its scale, is discarded: such a window is flat, and for negative
-    q it would dominate the moment. Scales left without any window are left out of the fit.
-    The spectrum (``alpha`` and ``f_alpha``) is NaN when there are fewer than three ``qs``.
+    q it would dominate the moment. A scale left with fewer than ``min_windows`` windows is
+    left out of the fit, and :class:`TooFewScales` is raised when fewer than three scales
+    remain. The spectrum (``alpha`` and ``f_alpha``) is NaN when there are fewer than three
+    ``qs``.
     """
     x = np.asarray(x, dtype=float)
     if x.ndim != 1:
@@ -191,27 +217,44 @@ def mfdfa(
         raise ValueError(f"order must not be negative, got {order}")
     if min_variance_ratio < 0:
         raise ValueError(f"min_variance_ratio must not be negative, got {min_variance_ratio}")
+    if min_windows < 1:
+        raise ValueError(f"min_windows must be at least 1, got {min_windows}")
     qs = _as_qs(qs)
     scales = _as_scales(scales, order, x.size)
+
+    excluded_before = None
+    if exclude is not None:
+        exclude = np.asarray(exclude)
+        if exclude.dtype != bool or exclude.shape != x.shape:
+            raise ValueError("exclude must be a boolean array with one entry per sample of x")
+        if exclude.all():
+            raise ValueError("exclude leaves no sample of x")
+        x = np.where(exclude, x[~exclude].mean(), x)
+        # Number of excluded samples before each position, to count them inside any window.
+        excluded_before = np.concatenate([[0], np.cumsum(exclude)])
 
     profile = np.cumsum(x - x.mean())
     fq = np.full((qs.size, scales.size), np.nan)
     n_windows = np.zeros(scales.size, dtype=int)
     for i, scale in enumerate(scales):
         variances = _window_variances(profile, scale, order)
-        variances = variances[variances > min_variance_ratio * np.median(variances)]
+        if excluded_before is not None:
+            starts = _window_starts(x.size, scale)
+            variances = variances[excluded_before[starts + scale] == excluded_before[starts]]
+        if variances.size:
+            variances = variances[variances > min_variance_ratio * np.median(variances)]
         n_windows[i] = variances.size
         if variances.size:
             fq[:, i] = _fluctuation(variances, qs)
 
-    fit = n_windows > 0
+    fit = n_windows >= min_windows
     if fit_range is not None:
         low, high = fit_range
         fit &= (scales >= low) & (scales <= high)
     if fit.sum() < MIN_FIT_SCALES:
-        raise ValueError(
+        raise TooFewScales(
             f"{fit.sum()} scale(s) left to fit h(q), need at least {MIN_FIT_SCALES}: check "
-            "fit_range, and that the series is not constant"
+            "fit_range, exclude, and that the series is not constant"
         )
     h, intercept, r2 = _loglog_fit(scales[fit], fq[:, fit])
 
@@ -229,6 +272,7 @@ def mfdfa(
         f_alpha=qs * alpha - tau,
         intercept=intercept,
         n_windows=n_windows,
+        fitted=fit,
     )
 
 

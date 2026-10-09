@@ -1,10 +1,11 @@
-# Band-power baseline features, per channel and epoch.
-# Provisional defaults, written before the feature code exists; revisit when it lands.
+# Band-power baseline features (pdeeg.features.psd), per channel of the continuous recording.
+# Like the MFDFA features they are computed twice, on every Welch segment and on the segments
+# that touch no stretch annotated BAD. None of these values was tuned on the data.
 
 method: welch
 fmin: 1.0             # Hz
 fmax: 48.0
-window_sec: 2.0       # Welch segment length
+window_sec: 2.0       # Welch segment length (Hann taper): 0.5 Hz resolution, 179 segments
 overlap: 0.5          # fraction of a segment
 
 relative: true        # divide each band by total power in [fmin, fmax]

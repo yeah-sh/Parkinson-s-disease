@@ -32,6 +32,7 @@ from pdeeg.data.bids import load_raw
 from pdeeg.preprocessing import qc
 from pdeeg.preprocessing.ica import CLASSES, classify_components, fit_ica, select_components
 from pdeeg.preprocessing.segments import annotate_bad_segments
+from pdeeg.viz.style import save
 
 # Part of the cache key. Raise it when the processing changes in a way the config cannot show,
 # so that outputs written by older code are redone.
@@ -321,10 +322,10 @@ def process_recording(
                 raw, config.preprocessing, config.data.dataset.line_freq
             )
             title = f"sub-{subject} ses-{session}"
-            qc.save(qc.plot_psd(log, config.preprocessing, title), paths["psd"])
+            save(qc.plot_psd(log, config.preprocessing, title), paths["psd"])
             removed = log["ica"]["removed"]
             if removed:
-                qc.save(qc.plot_removed_components(ica, clean.info, removed, title), paths["ica"])
+                save(qc.plot_removed_components(ica, clean.info, removed, title), paths["ica"])
             else:
                 paths["ica"].unlink(missing_ok=True)
             with warnings.catch_warnings():

@@ -63,6 +63,7 @@ class DataConfig:
     paths: PathsConfig
     sessions: dict[str, SessionConfig]
     participants_rename: dict[str, str]
+    regions: dict[str, tuple[str, ...]]
 
 
 # --- preprocessing.yaml ------------------------------------------------------------------------
@@ -142,18 +143,76 @@ class PreprocessingConfig:
 
 
 @dataclass(frozen=True)
+class BroadbandConfig:
+    fit_ranges: dict[str, tuple[float, float]]
+    wide_features: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class EnvelopeConfig:
+    bands: dict[str, tuple[float, float]]
+    trans_bandwidth: float
+    edge_trim: float
+    fit_ranges: dict[str, tuple[float, float]]
+    wide_features: dict[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True)
+class BadWindowsConfig:
+    min_windows: int
+    min_scales: int
+
+
+@dataclass(frozen=True)
+class SurrogatesConfig:
+    n_iaaft: int
+    n_shuffle: int
+    seed: int
+
+
+@dataclass(frozen=True)
+class MfdfaExtractionConfig:
+    cache_dir: Path
+    report: Path
+    figures_dir: Path
+    n_jobs: int
+
+
+@dataclass(frozen=True)
+class ScalingInspectionConfig:
+    n_recordings: int
+    seed: int
+    channels: tuple[str, ...]
+    qs: tuple[float, ...]
+    n_scales: int
+    broadband_scale_min: float
+    envelope_scale_min: float
+    slope_half_width: int
+    null_exponents: tuple[float, ...]
+    null_realisations: int
+    report: Path
+    figures_dir: Path
+    n_jobs: int
+
+
+@dataclass(frozen=True)
 class MfdfaConfig:
     q_min: float
     q_max: float
     q_step: float
-    scale_min: int
-    scale_max_frac: float
-    n_scales: int
     detrend_order: int
-    fit_range: tuple[float, float] | None
+    scales_per_range: int
+    scale_max_frac: float
     min_variance_ratio: float
+    poor_fit_r2: float
     iaaft_max_iter: int
     features: tuple[str, ...]
+    broadband: BroadbandConfig
+    envelope: EnvelopeConfig
+    bad_windows: BadWindowsConfig
+    surrogates: SurrogatesConfig
+    extraction: MfdfaExtractionConfig
+    inspection: ScalingInspectionConfig
 
 
 @dataclass(frozen=True)
@@ -335,9 +394,46 @@ def _validate(config: Config) -> None:
     mfdfa = config.mfdfa
     if not mfdfa.q_min < mfdfa.q_max:
         raise ConfigError(f"mfdfa: q_min {mfdfa.q_min} must be below q_max {mfdfa.q_max}")
-    if mfdfa.fit_range is not None and not mfdfa.fit_range[0] < mfdfa.fit_range[1]:
-        low, high = mfdfa.fit_range
-        raise ConfigError(f"mfdfa.fit_range: lower end {low} must be below upper end {high}")
+    for variant in ("broadband", "envelope"):
+        section = getattr(mfdfa, variant)
+        for name, (low, high) in section.fit_ranges.items():
+            if not 0 < low < high:
+                raise ConfigError(
+                    f"mfdfa.{variant}.fit_ranges.{name}: need 0 < lower end < upper end, "
+                    f"got {low} and {high}"
+                )
+        if set(section.wide_features) != set(section.fit_ranges):
+            raise ConfigError(
+                f"mfdfa.{variant}.wide_features: need one entry per fit range "
+                f"({', '.join(section.fit_ranges)}), got {', '.join(section.wide_features)}"
+            )
+    if not 1 <= mfdfa.bad_windows.min_scales <= mfdfa.scales_per_range:
+        raise ConfigError(
+            f"mfdfa.bad_windows.min_scales: must lie between 1 and scales_per_range "
+            f"({mfdfa.scales_per_range}), got {mfdfa.bad_windows.min_scales}"
+        )
+    placed: dict[str, str] = {}
+    for region, channels in config.data.regions.items():
+        for channel in channels:
+            if channel in placed:
+                raise ConfigError(
+                    f"data.regions: {channel} is in both {placed[channel]} and {region}"
+                )
+            placed[channel] = region
+    for band, (low, high) in mfdfa.envelope.bands.items():
+        if not 0 < low < high:
+            raise ConfigError(
+                f"mfdfa.envelope.bands.{band}: need 0 < lower edge < upper edge, "
+                f"got {low} and {high}"
+            )
+    inspection_qs = mfdfa.inspection.qs
+    if 2.0 not in inspection_qs or list(inspection_qs) != sorted(set(inspection_qs)):
+        raise ConfigError(
+            f"mfdfa.inspection.qs: must be increasing and include 2, got {list(inspection_qs)}"
+        )
+    # The cleaned EEG itself is analysed under this name, next to the band envelopes.
+    if "broadband" in mfdfa.envelope.bands:
+        raise ConfigError("mfdfa.envelope.bands: a band cannot be called 'broadband'")
     ica = config.preprocessing.ica
     if isinstance(ica.n_components, str) and ica.n_components != "rank":
         raise ConfigError(

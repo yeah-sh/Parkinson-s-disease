@@ -12,6 +12,7 @@ import pandas as pd
 from pdeeg.config import Config, QcConfig
 from pdeeg.preprocessing import qc
 from pdeeg.preprocessing.pipeline import config_hash, output_paths, read_log
+from pdeeg.viz.style import save
 
 # Signal metrics compared across recordings: the column, the side on which an extreme value is
 # a problem, and the reason given, formatted with the recording's row.
@@ -271,9 +272,9 @@ def write_report(config: Config, recordings: pd.DataFrame) -> Path:
     if not done.empty:
         prep.qc.figures_dir.mkdir(parents=True, exist_ok=True)
         overview = prep.qc.figures_dir / "overview.png"
-        qc.save(qc.plot_overview(done, prep), overview)
+        save(qc.plot_overview(done, prep), overview)
         spectra = prep.qc.figures_dir / "psd_overview.png"
-        qc.save(
+        save(
             qc.plot_psd_overview(
                 np.asarray(done["psd"][0]["freqs_hz"]),
                 np.array([psd["before_db"] for psd in done["psd"]]),

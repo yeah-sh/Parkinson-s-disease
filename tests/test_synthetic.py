@@ -3,7 +3,13 @@
 import numpy as np
 import pytest
 
-from pdeeg.features.synthetic import binomial_cascade, binomial_cascade_spectrum, fgn
+from pdeeg.features.mfdfa import make_scales, mfdfa
+from pdeeg.features.synthetic import (
+    binomial_cascade,
+    binomial_cascade_spectrum,
+    fgn,
+    power_law_noise,
+)
 
 
 def fgn_autocovariance(lag: int, hurst: float) -> float:
@@ -34,6 +40,33 @@ def test_fgn_is_reproducible_and_validates_its_arguments():
     for hurst in (0.0, 1.0, 1.2):
         with pytest.raises(ValueError, match="hurst"):
             fgn(1000, hurst, np.random.default_rng(1))
+
+
+@pytest.mark.parametrize(
+    ("beta", "tolerance"),
+    # h(2) over 100 realisations of 65536 samples, 20 scales from 16 samples to a tenth of the
+    # length: 0.502 +- 0.010, 1.000 +- 0.015 and 1.495 +- 0.023. Four standard deviations, plus
+    # the bias of 0.005 for the last.
+    [(0.0, 0.04), (1.0, 0.06), (2.0, 0.1)],
+)
+def test_power_law_noise_has_the_exponent_of_its_spectrum(beta, tolerance):
+    x = power_law_noise(2**16, beta, np.random.default_rng(11))
+
+    h2 = mfdfa(x, make_scales(x.size, 16, 0.1, 20), [2.0]).h[0]
+
+    assert h2 == pytest.approx((beta + 1.0) / 2.0, abs=tolerance)
+    assert x.std() == pytest.approx(1.0)
+    assert x.mean() == pytest.approx(0.0, abs=1e-12)
+
+
+def test_power_law_noise_is_reproducible_and_validates_its_arguments():
+    first = power_law_noise(1001, 1.0, np.random.default_rng(1))
+
+    assert first.shape == (1001,)
+    assert np.array_equal(first, power_law_noise(1001, 1.0, np.random.default_rng(1)))
+    assert not np.array_equal(first, power_law_noise(1001, 1.0, np.random.default_rng(2)))
+    with pytest.raises(ValueError, match="n_samples"):
+        power_law_noise(1, 1.0, np.random.default_rng(1))
 
 
 def test_binomial_cascade_is_built_by_repeated_splitting():

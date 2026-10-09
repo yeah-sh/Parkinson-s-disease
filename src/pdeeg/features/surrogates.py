@@ -48,8 +48,12 @@ def iaaft_surrogate(x: ArrayLike, rng: np.random.Generator, max_iter: int = 100)
     surrogate = rng.permutation(x)
     order = None
     for _ in range(max_iter):
-        phases = np.angle(np.fft.rfft(surrogate))
-        spectral = np.fft.irfft(amplitudes * np.exp(1j * phases), n=x.size)
+        spectrum = np.fft.rfft(surrogate)
+        # Keep each phase and set the amplitude, by rescaling rather than through the angle:
+        # the same thing at two thirds of the cost. A bin of exactly zero is left at zero.
+        scale = np.abs(spectrum)
+        np.divide(amplitudes, scale, out=scale, where=scale > 0)
+        spectral = np.fft.irfft(spectrum * scale, n=x.size)
         previous, order = order, np.argsort(spectral)
         surrogate[order] = sorted_x
         if previous is not None and np.array_equal(order, previous):

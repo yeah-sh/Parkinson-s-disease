@@ -1,27 +1,30 @@
 # Multifractal Detrended Fluctuation Analysis (pdeeg.features.mfdfa), per channel.
-# Preprocessing delivers one continuous 180 s recording per session, not epochs.
-# The scale and fit-range values are generic defaults, validated on synthetic signals only;
-# revisit them when the EEG features are written.
+# Preprocessing delivers one continuous 180 s recording per session (92160 samples at 512 Hz),
+# not epochs.
+#
+# Two kinds of series are analysed: the cleaned EEG itself ("broadband") and the amplitude
+# envelope of the EEG in each of a few frequency bands ("envelope").
 
 # Moment orders q, from q_min to q_max inclusive.
 q_min: -5.0
 q_max: 5.0
 q_step: 0.5
 
-# Window sizes: n_scales of them, log-spaced from scale_min samples to scale_max_frac of the
-# series length, rounded to integers. At 0.1 every scale has at least 10 windows from each end.
-scale_min: 16
-scale_max_frac: 0.1
-n_scales: 20
-
 detrend_order: 1      # polynomial order removed from each window
 
-# Scales used to fit h(q): [low, high] in samples, both included, or null for all of them.
-fit_range: null
+# h(q) is fitted separately over each fit range below, on scales_per_range window sizes
+# log-spaced between the two ends of the range and rounded to whole samples.
+scales_per_range: 12
+# No window may be longer than this fraction of the series. At 0.1 every scale has at least 10
+# windows from each end.
+scale_max_frac: 0.1
 
 # A window is discarded when its residual variance is at most this fraction of the median over
 # the windows of its scale. Flat windows would otherwise dominate the moments for negative q.
 min_variance_ratio: 1.0e-12
+
+# A fit is reported as poor when its worst R² over the moment orders is below this.
+poor_fit_r2: 0.9
 
 # Most rounds an IAAFT surrogate (pdeeg.features.surrogates) may take; it stops sooner once a
 # round leaves the ordering of the values unchanged.
@@ -30,3 +33,128 @@ iaaft_max_iter: 100
 # Entries of pdeeg.features.mfdfa.spectrum_features to use as features. It also returns
 # min_r2, the worst R² among the h(q) fits, which is a quality measure rather than a feature.
 features: [h2, delta_h, delta_alpha, alpha0, asymmetry]
+
+# --- Fit ranges: proposed from the scaling inspection, approved 2026-10-09 ----------------------
+# Read from reports/mfdfa_scaling.md: 8 recordings picked at random (seed below) and shown as
+# R1 to R8, with no subject, session or group label read or displayed, next to noise put
+# through the same filters. Numbers quoted here are local slopes of log Fq(s) against log s
+# for q = 2 (median over the 8 x 32 channels) unless another q is named.
+
+broadband:
+  # The cleaned EEG has no single scaling regime. Its fluctuation function has three
+  # crossovers, two of them made by the preprocessing band-pass (0.5 to 50 Hz):
+  #   1. Below about 0.05 s the 50 Hz low-pass has smoothed the signal. 1/f noise, whose slope
+  #      is 1 at every scale, shows 1.53 at 0.02 s after the same filter and is within 0.1 of 1
+  #      only from 0.049 s on. For q = -5 it is still 2.1 at 0.043 s and 1.3 at 0.088 s, and
+  #      within 0.1 only from 0.16 s.
+  #   2. The alpha rhythm: the slope falls from 1.02 at 0.088 s to a minimum of 0.62 at
+  #      0.18 s (0.51 for q = 5), just under two alpha periods, and is back at 0.82 by 0.32 s
+  #      and 0.96 by 0.43 s. For q = -5 there is no dip.
+  #   3. Above about 1 s the 0.5 Hz high-pass has left nothing to accumulate: filtered 1/f
+  #      noise is at 0.93 at 0.88 s, 0.87 at 1.17 s and 0.16 at 4.9 s; the EEG is at 1.03 at
+  #      1 s, 0.80 at 2.1 s and 0.33 at 4.9 s.
+  # That leaves two short stretches. Scales used to fit h(q): name -> [low, high] in seconds,
+  # both included.
+  fit_ranges:
+    # 24 to 46 samples, between crossovers 1 and 2: 0.28 decades. EEG slope 1.25 falling to
+    # 1.02. Usable for h2 only: on this range filtered monofractal 1/f noise has
+    # delta_alpha = 1.08 (EEG: 1.07), so the width, delta_h and asymmetry measured here are
+    # those of the low-pass filter, not of the signal.
+    short: [0.045, 0.09]
+    # 154 to 512 samples, between crossovers 2 and 3: 0.52 decades. EEG slope 0.82 rising to
+    # 1.05; filtered 1/f noise gives h2 = 0.97 and delta_alpha = 0.12 here. Starting at 0.4 s
+    # would clear the alpha crossover fully but raises that noise floor to 0.19. One recording
+    # of the eight (R7) is flat from 0.2 s on: h2 is 0.07 to 0.15 in all 32 channels and every
+    # fit is poor, against 0 to 3 % poor fits in the other seven. It has almost no power below
+    # the alpha band.
+    long: [0.3, 1.0]
+  # Features of each range that go into the wide table for modelling. The long table has all of
+  # them for every range. Only h2 from the short range, for the reason given above.
+  wide_features:
+    short: [h2]
+    long: [h2, delta_h, delta_alpha, alpha0, asymmetry]
+
+envelope:
+  # [low, high] in Hz.
+  bands:
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 30.0]
+  # Zero-phase FIR band-pass (firwin, Hamming) with this transition width in Hz on both sides
+  # of every band, so that the filter is 1.65 s long for all of them.
+  trans_bandwidth: 2.0
+  # Seconds dropped from each end of the envelope, where the filter and the Hilbert transform
+  # have data on one side only. On 1/f noise the theta envelope was 5 % off a quarter to half a
+  # second from the edge and 0.7 % or less beyond 1 s.
+  edge_trim: 1.0
+  fit_ranges:
+    # 1024 to 9113 samples: 0.95 decades, up to a tenth of the trimmed envelope (178 s).
+    # The lower end is set by the band-pass, which gives the envelope a memory of its own. The
+    # envelope of white noise, which should have slope 0.5, has 0.70 / 0.68 / 0.58 (theta /
+    # alpha / beta) at 1 s, 0.60 / 0.59 / 0.54 at 2 s and 0.55 / 0.55 / 0.51 at 3.5 s. Fitted
+    # from 1 s it gives h2 = 0.56 / 0.56 / 0.52 and delta_alpha = 0.31 / 0.24 / 0.15; from 2 s,
+    # h2 = 0.54 / 0.53 / 0.52 and delta_alpha = 0.19 / 0.17 / 0.13; from 3 s the width is no
+    # lower (0.21 / 0.16 / 0.15). So 2 s, not 1 s: the smallest start at which the width of
+    # memoryless noise is down to its finite-length floor. The EEG envelopes lie above that
+    # noise at every scale (h2 = 0.70 / 0.74 / 0.69) but keep bending down with it, so their
+    # h2 carries a filter bias of +0.02 to +0.04, the same for every recording.
+    main: [2.0, 17.8]
+  wide_features:
+    main: [h2, delta_h, delta_alpha, alpha0, asymmetry]
+
+# --- Stretches marked bad ------------------------------------------------------------------------
+# Every feature is computed twice: on the whole recording ("full"), and with every window that
+# touches a stretch annotated BAD left out ("clean"). Windows are dropped where they stand;
+# data is never cut out and joined. For an envelope, a bad stretch is widened by
+# envelope.edge_trim on both sides first, because the band-pass spreads an artefact that far.
+#
+# Both numbers below were set from the count of surviving windows alone, before any feature was
+# computed. 22 of the 46 recordings have no bad stretch, and the two broadband ranges always
+# keep at least 316 windows per scale. Only the envelope range is affected: its largest scale
+# (17.8 s) has 20 windows, and 3 recordings keep fewer than 8 of them.
+bad_windows:
+  # A scale with fewer clean windows than this is left out of the fit. With 8, 43 recordings
+  # keep all 12 scales of the envelope range and the other three keep 11, 9 and 8.
+  min_windows: 8
+  # A fit on fewer scales than this is not made (the features are NaN). The number of scales a
+  # fit used is stored as n_scales, so that fits on a shortened range can be told apart.
+  min_scales: 8
+
+# --- Surrogates ----------------------------------------------------------------------------------
+# For every channel and series (the broadband EEG and each envelope, as analysed), surrogates of
+# the whole series are put through the same MFDFA on the same fit ranges. IAAFT keeps the
+# amplitude distribution and the power spectrum, so what is left of delta_alpha is what linear
+# correlations and the distribution explain; shuffling keeps the distribution alone.
+surrogates:
+  n_iaaft: 20
+  n_shuffle: 20
+  seed: 20261009
+
+# --- Extraction (`pdeeg mfdfa-features`) ---------------------------------------------------------
+extraction:
+  # One file per recording with every MFDFA run in it (original and surrogates), so that the
+  # feature tables can be rebuilt without repeating the surrogates.
+  cache_dir: data/interim/mfdfa
+  report: reports/qc_mfdfa.md
+  figures_dir: reports/figures/qc_mfdfa
+  n_jobs: 16            # channels analysed in parallel; does not affect the results
+
+# --- Label-blind look at the scaling (`pdeeg mfdfa-scaling`) -----------------------------------
+inspection:
+  n_recordings: 8       # picked at random and shown as R1, R2, ...; no label is read or shown
+  seed: 20261009
+  channels: [Fz, Cz, Pz, Oz]   # drawn in the fluctuation-function figures
+  qs: [-5.0, -2.0, 0.0, 2.0, 5.0]
+  # n_scales window sizes per series, log-spaced from the smallest below (seconds) to
+  # scale_max_frac of the series.
+  n_scales: 50
+  broadband_scale_min: 0.016
+  envelope_scale_min: 0.1
+  slope_half_width: 2   # a local slope is fitted through this many scales on either side
+  # Noise with no crossover of its own, put through the same filters as the EEG: 1/f^beta noise
+  # through the preprocessing band-pass, and white noise through each band envelope.
+  null_exponents: [1.0, 2.0]
+  null_realisations: 40
+  report: reports/mfdfa_scaling.md
+  figures_dir: reports/figures/mfdfa_scaling
+  n_jobs: 8             # does not affect the results
