@@ -1,6 +1,8 @@
 """Command-line entry point, installed as ``pdeeg``.
 
-Pipeline stages are added as subcommands as they are written.
+``pdeeg all`` runs the whole pipeline: download, recordings, preprocess, features, stats,
+classify, report. Each of them is also a command, and every step is skipped while it is current
+(:mod:`pdeeg.pipeline`), so running ``pdeeg all`` again only does what a change calls for.
 """
 
 from __future__ import annotations
@@ -8,7 +10,6 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import sys
-from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -18,244 +19,88 @@ import yaml
 from pdeeg import __version__
 from pdeeg.config import CONFIG_DIR_ENV, Config, ConfigError, load_config
 
+# Commands and what they do, in pipeline order. The ones under "steps" make up `pdeeg all`.
+STEPS = {
+    "download": "fetch the dataset from OpenNeuro, or check the copy on disk",
+    "recordings": "index the raw dataset into the recordings table",
+    "preprocess": "clean every recording and write the preprocessing QC report",
+    "features": "band power, MFDFA with surrogates, and h(q) curves for every recording",
+    "stats": "the pre-registered cluster tests of the features",
+    "classify": "nested cross-validated classification, tracked with MLflow",
+    "report": "write every report again from what the steps stored",
+}
+PARTS = {
+    "psd-features": "band-power features only (part of `features`)",
+    "mfdfa-features": "MFDFA features and their QC report only (part of `features`)",
+    "mfdfa-curves": "h(q) and f(alpha) curves only (part of `features`)",
+}
 
-def _write_recordings(config: Config) -> int:
+
+def _say(message: str) -> None:
+    print(message, flush=True)
+
+
+def _known_errors() -> tuple[type[Exception], ...]:
+    """Errors that say what is missing or wrong, printed without a traceback."""
     # Imported here because mne takes seconds to import and `pdeeg config` does not need it.
-    from pdeeg.data.bids import DatasetError, list_recordings
+    from pdeeg.data.bids import DatasetError
+    from pdeeg.data.download import DownloadError
+    from pdeeg.features.tables import TablesError
+    from pdeeg.models.data import TaskError
+    from pdeeg.models.store import StoreError
+    from pdeeg.pipeline import StepFailed
+    from pdeeg.stats.features import StatsError
 
-    data = config.data
-    try:
-        recordings = list_recordings(
-            data.paths.raw, data.sessions, rename_columns=data.participants_rename
-        )
-    except DatasetError as exc:
-        print(f"pdeeg: {exc}", file=sys.stderr)
-        return 1
-    data.paths.recordings.parent.mkdir(parents=True, exist_ok=True)
-    recordings.to_parquet(data.paths.recordings, index=False)
-
-    summary = recordings.groupby(["group", "session"], sort=False).agg(
-        recordings=("subject", "size"), participants=("subject", "nunique")
+    return (
+        DatasetError,
+        DownloadError,
+        StatsError,
+        StepFailed,
+        StoreError,
+        TablesError,
+        TaskError,
     )
-    print(summary.to_string())
-    print(f"{len(recordings)} recordings -> {data.paths.recordings}")
-    return 0
 
 
-def _preprocess(config: Config, n_jobs: int | None, force: bool) -> int:
-    import pandas as pd
+def _run(command: str, config: Config, args: argparse.Namespace) -> None:
+    from pdeeg import pipeline
 
-    from pdeeg.preprocessing.pipeline import run
-    from pdeeg.preprocessing.report import write_report
-
-    table = config.data.paths.recordings
-    if not table.is_file():
-        print(f"pdeeg: {table} not found; run `pdeeg recordings` first", file=sys.stderr)
-        return 1
-    recordings = pd.read_parquet(table)
-
-    def show(result: dict[str, Any]) -> None:
-        name = f"sub-{result['subject']} ses-{result['session']}"
-        detail = result["detail"].strip().splitlines()
-        print(
-            f"{name}: {result['status']} ({result['seconds']} s)"
-            + (f" - {detail[0]}" if detail else ""),
-            flush=True,
-        )
-
-    results = run(config, recordings, n_jobs=n_jobs, force=force, progress=show)
-    counts = Counter(result["status"] for result in results)
-    print(", ".join(f"{count} {status}" for status, count in counts.items()))
-    for result in results:
-        if result["status"] == "failed":
-            print(f"\nsub-{result['subject']} ses-{result['session']}:", file=sys.stderr)
-            print(result["detail"], file=sys.stderr)
-    print(f"QC report -> {write_report(config, recordings)}")
-    return 0 if set(counts) <= {"processed", "cached"} else 1
+    force = getattr(args, "force", False)
+    n_jobs = getattr(args, "n_jobs", None)
+    steps = {
+        "download": lambda: pipeline.download_step(config, force=force, say=_say),
+        "recordings": lambda: pipeline.recordings_step(config, force=force, say=_say),
+        "preprocess": lambda: pipeline.preprocess_step(
+            config, n_jobs=n_jobs, force=force, say=_say
+        ),
+        "features": lambda: pipeline.features_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "psd-features": lambda: pipeline.psd_step(
+            config, n_jobs=1 if n_jobs is None else n_jobs, force=force, say=_say
+        ),
+        "mfdfa-features": lambda: pipeline.mfdfa_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "mfdfa-curves": lambda: pipeline.curves_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "stats": lambda: pipeline.stats_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "classify": lambda: pipeline.classify_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "report": lambda: pipeline.report_step(config, say=_say),
+        "all": lambda: pipeline.all_steps(config, force=force, say=_say),
+    }
+    steps[command]()
 
 
-def _mfdfa_scaling(config: Config, n_jobs: int | None) -> int:
+def _mfdfa_scaling(config: Config, n_jobs: int | None) -> None:
     import pandas as pd
 
     from pdeeg.features.scaling import run_inspection
     from pdeeg.features.scaling_report import write_report
+    from pdeeg.pipeline import StepFailed
 
     table = config.data.paths.recordings
     if not table.is_file():
-        print(f"pdeeg: {table} not found; run `pdeeg recordings` first", file=sys.stderr)
-        return 1
+        raise StepFailed(f"{table} not found; run `pdeeg recordings` first")
     # Only what is needed to find the cleaned files: the group labels are never loaded.
     recordings = pd.read_parquet(table, columns=["subject", "session"])
     inspection = run_inspection(config, recordings, n_jobs=n_jobs)
-    print(f"Scaling report -> {write_report(config, inspection, len(recordings))}")
-    return 0
-
-
-def _read_recordings(config: Config):
-    import pandas as pd
-
-    table = config.data.paths.recordings
-    if not table.is_file():
-        print(f"pdeeg: {table} not found; run `pdeeg recordings` first", file=sys.stderr)
-        return None
-    return pd.read_parquet(table)
-
-
-def _psd_table(config: Config, recordings, n_jobs: int):
-    """Build and write the band-power tables; returns the long one."""
-    from pdeeg.features.psd import build_psd_table
-    from pdeeg.features.tables import psd_wide, write_tables
-
-    long = build_psd_table(config, recordings, n_jobs=n_jobs)
-    paths = write_tables(config, "psd", long, psd_wide(long))
-    print(f"Band-power features: {len(long)} values -> {paths['long']}")
-    print(f"Wide table -> {paths['wide']}")
-    return long
-
-
-def _psd_features(config: Config, n_jobs: int) -> int:
-    recordings = _read_recordings(config)
-    if recordings is None:
-        return 1
-    _psd_table(config, recordings, n_jobs)
-    return 0
-
-
-def _mfdfa_features(config: Config, n_jobs: int | None, force: bool) -> int:
-    import pandas as pd
-
-    from pdeeg.features.extract import run
-    from pdeeg.features.report import write_report
-    from pdeeg.features.tables import (
-        build_mfdfa_table,
-        mfdfa_wide,
-        table_paths,
-        write_tables,
-    )
-
-    recordings = _read_recordings(config)
-    if recordings is None:
-        return 1
-
-    def show(result: dict[str, Any]) -> None:
-        detail = result["detail"].strip().splitlines()
-        print(
-            f"sub-{result['subject']} ses-{result['session']}: {result['status']} "
-            f"({result['seconds']} s)" + (f" - {detail[0]}" if detail else ""),
-            flush=True,
-        )
-
-    results = run(config, recordings, n_jobs=n_jobs, force=force, progress=show)
-    counts = Counter(result["status"] for result in results)
-    print(", ".join(f"{count} {status}" for status, count in counts.items()))
-    if not set(counts) <= {"processed", "cached"}:
-        for result in results:
-            if result["status"] == "failed":
-                print(f"\nsub-{result['subject']} ses-{result['session']}:", file=sys.stderr)
-                print(result["detail"], file=sys.stderr)
-        return 1
-
-    long = build_mfdfa_table(config, recordings)
-    paths = write_tables(config, "mfdfa", long, mfdfa_wide(long, config.mfdfa))
-    print(f"MFDFA features: {len(long)} values -> {paths['long']}")
-    print(f"Wide table -> {paths['wide']}")
-    # The QC report sets the band powers next to the MFDFA features when they exist.
-    psd_path = table_paths(config, "psd")["long"]
-    psd = pd.read_parquet(psd_path) if psd_path.is_file() else None
-    print(f"QC report -> {write_report(config, recordings, long, psd)}")
-    return 0
-
-
-def _mfdfa_curves(config: Config, n_jobs: int | None) -> int:
-    from pdeeg.features.curves import build_curves_table, curves_path
-
-    recordings = _read_recordings(config)
-    if recordings is None:
-        return 1
-    jobs = config.mfdfa.extraction.n_jobs if n_jobs is None else n_jobs
-    curves = build_curves_table(config, recordings, n_jobs=jobs)
-    path = curves_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    curves.to_parquet(path, index=False)
-    print(f"h(q) and f(alpha): {len(curves)} rows -> {path}")
-    return 0
-
-
-def _stats(config: Config, n_jobs: int | None) -> int:
-    import pandas as pd
-
-    from pdeeg.features.curves import curves_path
-    from pdeeg.features.tables import table_paths
-    from pdeeg.stats.analysis import run_analysis, write_results
-    from pdeeg.stats.features import StatsError
-    from pdeeg.stats.report import write_report
-
-    recordings = _read_recordings(config)
-    if recordings is None:
-        return 1
-    tables = {}
-    for kind in ("mfdfa", "psd"):
-        path = table_paths(config, kind)["long"]
-        if not path.is_file():
-            print(f"pdeeg: {path} not found; run `pdeeg {kind}-features` first", file=sys.stderr)
-            return 1
-        tables[kind] = pd.read_parquet(path)
-    try:
-        results = run_analysis(config, recordings, tables, n_jobs=n_jobs)
-    except StatsError as exc:
-        print(f"pdeeg: {exc}", file=sys.stderr)
-        return 1
-    for name, path in write_results(config, results).items():
-        print(f"{name.capitalize()} -> {path}")
-    curves = curves_path(config)
-    if not curves.is_file():
-        print(f"pdeeg: {curves} not found; the report leaves out the h(q) figure", file=sys.stderr)
-    curves_table = pd.read_parquet(curves) if curves.is_file() else None
-    print(f"Report -> {write_report(config, results, curves_table)}")
-    return 0
-
-
-def _classify(config: Config, n_jobs: int | None) -> int:
-    import pandas as pd
-
-    from pdeeg.features.tables import table_paths
-    from pdeeg.models.classify import run_classification, summary_table
-    from pdeeg.models.report import write_report
-    from pdeeg.models.tracking import Tracker
-
-    recordings = _read_recordings(config)
-    if recordings is None:
-        return 1
-    inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
-    for kind, path in inputs.items():
-        if not path.is_file():
-            print(f"pdeeg: {path} not found; run `pdeeg {kind}-features` first", file=sys.stderr)
-            return 1
-    tables = {kind: pd.read_parquet(path) for kind, path in inputs.items()}
-    tracker = Tracker(config, inputs)
-
-    def show(result) -> None:
-        run_id = tracker.log(result)
-        observed = result.observed
-        print(
-            f"{result.task} / {result.feature_set} / {result.model}: balanced accuracy "
-            f"{observed['balanced_accuracy']:.2f} "
-            f"(p = {result.p_values['balanced_accuracy']:.3f}), "
-            f"AUC {observed['roc_auc']:.2f} - MLflow run {run_id}",
-            flush=True,
-        )
-
-    results = run_classification(config, recordings, tables, n_jobs=n_jobs, progress=show)
-    table = summary_table(results, config)
-    dataset = config.data.dataset
-    name = f"classification_summary_{dataset.id}-{dataset.version}.parquet"
-    summary = config.data.paths.processed / name
-    table.to_parquet(summary, index=False)
-    print(f"Summary -> {summary}")
-    files = write_report(config, results, table)
-    tracker.log_summary([*files, summary])
-    print(f"Report -> {files[0]}")
-    return 0
+    _say(f"Scaling report -> {write_report(config, inspection, len(recordings))}")
 
 
 def _plain(value: Any) -> Any:
@@ -267,6 +112,18 @@ def _plain(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def _add_n_jobs(parser: argparse.ArgumentParser, what: str) -> None:
+    parser.add_argument(
+        "--n-jobs", type=int, default=None, help=f"{what} (default: from the configuration)"
+    )
+
+
+def _add_force(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--force", action="store_true", help="run even if the stored outputs are current"
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -282,11 +139,21 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"directory holding the YAML configs (default: ${CONFIG_DIR_ENV}, else ./configs)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("config", help="print the fully resolved configuration as YAML")
-    commands.add_parser("recordings", help="index the raw dataset and save the recordings table")
-    preprocess = commands.add_parser(
-        "preprocess", help="clean every recording and write the preprocessing QC report"
+    everything = commands.add_parser(
+        "all", help="the whole pipeline, skipping every step that is current"
     )
+    everything.add_argument(
+        "--force",
+        action="store_true",
+        help="run every step again, preprocessing and MFDFA included (hours)",
+    )
+    for name, text in STEPS.items():
+        step = commands.add_parser(name, help=text)
+        if name != "report":
+            _add_force(step)
+        if name in ("preprocess", "features", "stats", "classify"):
+            _add_n_jobs(step, "processes to use")
+    preprocess = commands.choices["preprocess"]
     preprocess.add_argument(
         "--config",
         type=Path,
@@ -294,69 +161,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="preprocessing YAML to use; the other settings are read from its directory "
         "unless --config-dir is given (default: preprocessing.yaml in the config directory)",
     )
-    preprocess.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="recordings to process in parallel (default: n_jobs in the preprocessing config)",
-    )
-    preprocess.add_argument(
-        "--force", action="store_true", help="redo recordings whose outputs are up to date"
-    )
-    features = commands.add_parser(
-        "mfdfa-features",
-        help="MFDFA features with surrogates for every recording, and their QC report",
-    )
-    features.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="channels to analyse in parallel (default: extraction.n_jobs in the MFDFA config)",
-    )
-    features.add_argument(
-        "--force", action="store_true", help="redo recordings whose stored runs are up to date"
-    )
-    psd = commands.add_parser("psd-features", help="band-power features for every recording")
-    psd.add_argument(
-        "--n-jobs", type=int, default=1, help="recordings to analyse in parallel (default: 1)"
-    )
+    for name, text in PARTS.items():
+        part = commands.add_parser(name, help=text)
+        _add_force(part)
+        _add_n_jobs(part, "processes to use")
     scaling = commands.add_parser(
         "mfdfa-scaling",
         help="plot the scaling of a few recordings, without their labels, to choose fit ranges",
     )
-    scaling.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="processes to use (default: inspection.n_jobs in the MFDFA config)",
-    )
-    curves = commands.add_parser(
-        "mfdfa-curves", help="h(q) and f(alpha) of every channel of every recording, for figures"
-    )
-    curves.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="recordings to analyse in parallel (default: extraction.n_jobs in the MFDFA config)",
-    )
-    stats = commands.add_parser(
-        "stats", help="group and paired cluster tests of the features, and the results report"
-    )
-    stats.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="tests to run in parallel (default: n_jobs in the stats config)",
-    )
-    classify = commands.add_parser(
-        "classify", help="nested cross-validated classification, tracked with MLflow, and report"
-    )
-    classify.add_argument(
-        "--n-jobs",
-        type=int,
-        default=None,
-        help="permutations to run in parallel (default: n_jobs in the model config)",
-    )
+    _add_n_jobs(scaling, "processes to use")
+    commands.add_parser("config", help="print the fully resolved configuration as YAML")
     return parser
 
 
@@ -371,23 +185,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"pdeeg: {exc}", file=sys.stderr)
         return 2
-    if args.command == "recordings":
-        return _write_recordings(config)
-    if args.command == "preprocess":
-        return _preprocess(config, args.n_jobs, args.force)
-    if args.command == "mfdfa-scaling":
-        return _mfdfa_scaling(config, args.n_jobs)
-    if args.command == "mfdfa-features":
-        return _mfdfa_features(config, args.n_jobs, args.force)
-    if args.command == "psd-features":
-        return _psd_features(config, args.n_jobs)
-    if args.command == "mfdfa-curves":
-        return _mfdfa_curves(config, args.n_jobs)
-    if args.command == "stats":
-        return _stats(config, args.n_jobs)
-    if args.command == "classify":
-        return _classify(config, args.n_jobs)
-    yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
+    if args.command == "config":
+        yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
+        return 0
+    try:
+        if args.command == "mfdfa-scaling":
+            _mfdfa_scaling(config, args.n_jobs)
+        else:
+            _run(args.command, config, args)
+    except _known_errors() as exc:
+        print(f"pdeeg: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import datetime
 import hashlib
 import os
 from pathlib import Path
@@ -551,7 +550,7 @@ def write_report(config: Config, results: Results, curves: pd.DataFrame | None) 
     lines = [
         "# Statistical analysis",
         "",
-        f"Written by `pdeeg stats` on {datetime.date.today().isoformat()}. Pre-registered in "
+        f"Written by `pdeeg stats`. Pre-registered in "
         f"{_registration(config)}; the file was written before any group was compared, and a "
         "change to it since would make the analysis it affects exploratory.",
         "",

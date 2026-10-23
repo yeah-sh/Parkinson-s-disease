@@ -1,0 +1,23 @@
+# Only pyproject.toml, README.md, src/, configs/ and docker/ go into the image.
+.git
+.github
+.venv
+venv
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.ipynb_checkpoints
+data
+reports
+mlruns
+mlartifacts
+mlflow.db
+notebooks
+tests
+scripts
+app
+Makefile
+Dockerfile
+.dockerignore

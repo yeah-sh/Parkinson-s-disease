@@ -1,0 +1,6 @@
+# Files run by Linux tools keep LF line endings whatever the checkout's platform: a CR at the
+# end of a line breaks sh, make and the Dockerfile's continuation lines.
+*.sh        text eol=lf
+Makefile    text eol=lf
+Dockerfile  text eol=lf
+*.yml       text eol=lf

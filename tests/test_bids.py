@@ -139,6 +139,7 @@ def test_load_raw_rejects_a_recording_that_lacks_montage_channels(bids_root: Pat
         load_raw(recordings.iloc[0], bids_root, "biosemi64")
 
 
+@pytest.mark.dataset
 def test_real_dataset_counts_channels_and_sampling_rate():
     """Integration test against the downloaded dataset; skipped until it has been downloaded."""
     data = load_config(CONFIG_DIR).data

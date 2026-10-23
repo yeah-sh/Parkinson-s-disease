@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import os
 from pathlib import Path
@@ -226,7 +225,7 @@ def write_report(config: Config, results: list[Evaluation], table: pd.DataFrame)
     lines = [
         "# Classification (exploratory)",
         "",
-        f"Written by `pdeeg classify` on {datetime.date.today().isoformat()}. Settings: "
+        f"Written by `pdeeg classify`. Settings: "
         f"`configs/model.yaml`, SHA-256 `{digest}`, written before any classifier was run. "
         f"Every evaluation is an MLflow run in experiment `{model.tracking.experiment}` "
         f"(`{model.tracking.db.name}`, artifacts in `{model.tracking.artifacts.name}/`).",

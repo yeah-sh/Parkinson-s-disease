@@ -318,19 +318,9 @@ def run_analysis(
 ) -> Results:
     """Run every test on the long feature tables ``tables`` (``mfdfa``, ``psd``)."""
     settings = config.stats
-    features = catalogue(config)
-    absent = sorted({feature.table for feature in features} - set(tables))
-    if absent:
-        raise StatsError(f"no {', '.join(absent)} feature table")
-    channels = tuple(
-        name for name in tables[features[0].table].query("level == 'channel'")["name"].unique()
-    )
-    plan = design(config, recordings, channels)
+    features, plan, values = _prepare(config, recordings, tables)
+    channels = plan.channels
     adjacency = channel_adjacency(settings.cluster.adjacency, list(channels))
-    values = {
-        feature.key: channel_values(tables[feature.table], feature, settings.segments, channels)
-        for feature in features
-    }
     jobs = [
         (analysis, feature, analysis_inputs(analysis, values[feature.key], plan, config))
         for feature in features
@@ -371,6 +361,42 @@ def run_analysis(
         channels=channel_table,
         values=values,
     )
+
+
+def _prepare(
+    config: Config, recordings: pd.DataFrame, tables: Mapping[str, pd.DataFrame]
+) -> tuple[list[Feature], Design, dict[str, pd.DataFrame]]:
+    """The features, who is in each analysis, and every feature's channel values."""
+    features = catalogue(config)
+    absent = sorted({feature.table for feature in features} - set(tables))
+    if absent:
+        raise StatsError(f"no {', '.join(absent)} feature table")
+    channels = tuple(
+        name for name in tables[features[0].table].query("level == 'channel'")["name"].unique()
+    )
+    values = {
+        feature.key: channel_values(tables[feature.table], feature, config.stats.segments, channels)
+        for feature in features
+    }
+    return features, design(config, recordings, channels), values
+
+
+def load_results(
+    config: Config, recordings: pd.DataFrame, tables: Mapping[str, pd.DataFrame]
+) -> Results:
+    """The results :func:`write_results` stored, for writing the report again.
+
+    The tests are not run again: their tables are read back, and the design and the channel
+    values, which are quick to get, are taken from ``recordings`` and ``tables`` as
+    :func:`run_analysis` takes them.
+    """
+    paths = result_paths(config)
+    missing = [str(path) for path in paths.values() if not path.is_file()]
+    if missing:
+        raise StatsError(f"no stored results: {', '.join(missing)}; run `pdeeg stats` first")
+    features, plan, values = _prepare(config, recordings, tables)
+    stored = {name: pd.read_parquet(path) for name, path in paths.items()}
+    return Results(design=plan, features=features, values=values, **stored)
 
 
 def result_paths(config: Config) -> dict[str, Path]:

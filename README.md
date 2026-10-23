@@ -4,11 +4,10 @@ Characterising and classifying Parkinson's disease (PD) from resting-state EEG: 
 controls, and PD off against on medication. The main features come from Multifractal Detrended
 Fluctuation Analysis (MFDFA); band power from the power spectrum is the baseline.
 
-**Status:** data access, preprocessing, the MFDFA algorithm, and the features. Downloading,
-indexing, loading and cleaning the recordings work; the MFDFA code is validated on synthetic
-signals; the fit ranges were chosen without sight of the group labels; and MFDFA features with
-surrogates and band-power features are extracted for every recording, with a QC report. The later
-stages (models, statistics) are not written, and nothing has been compared between groups.
+**Status:** every stage is written, and `pdeeg all` runs them from download to reports. The MFDFA
+code is validated on synthetic signals, the fit ranges were chosen without sight of the group
+labels, and the group statistics (the primary analysis) and the classification (exploratory)
+were fixed in `configs/stats.yaml` and `configs/model.yaml` before any group was compared.
 
 ## Setup
 
@@ -17,10 +16,36 @@ Requires Python 3.11 or 3.12.
 ```
 python -m venv .venv
 .venv\Scripts\activate          # Windows; on Linux/macOS: source .venv/bin/activate
-pip install -e .[dev]
+pip install -e .[dev]           # .[dev,app] for the research demo as well
 ruff check .
-pytest
+pytest                          # synthetic data only; the one dataset test skips without it
 ```
+
+## Running the pipeline
+
+```
+pdeeg all                       # download, recordings, preprocess, features, stats, classify
+pdeeg all --force               # run every step again (preprocessing and MFDFA take hours)
+```
+
+Each step is also a command: `pdeeg download`, `recordings`, `preprocess`, `features` (band
+power, MFDFA and the h(q) curves; also `psd-features`, `mfdfa-features`, `mfdfa-curves` alone),
+`stats`, `classify`, and `report`, which writes every report again from what the steps stored.
+Each takes `--force`, and those that run in parallel take `--n-jobs N`.
+
+A step is skipped while it is current. `download`, `recordings`, the band powers, the curves,
+`stats` and `classify` record a stamp in `data/interim/stages/` with a digest of their settings
+and the SHA-256 of every input and output file; they run again when a setting, an input or an
+output differs. Preprocessing and the MFDFA runs keep their per-recording caches (settings and
+file times). Every report is rewritten each time from the stored results and holds no date or
+time. The seeds are fixed in the configuration, and every random stream is derived from the seed
+and the name of what it is for, not from the order or the number of processes.
+
+| Also | |
+|---|---|
+| `make all`, `make stats FORCE=1`, `make features N_JOBS=8`, ... | Makefile targets for every command, plus `install`, `test`, `lint`, `format`, `docker-build`, `docker-run`, `app`. Plain `make` lists them. |
+| `docker build -t pdeeg .` then `docker run --rm -v "$PWD/data:/app/data" pdeeg` | `pdeeg all` in a container (Python 3.12 slim, non-root user). Everything goes to the mounted `data/`: reports to `data/reports/`, MLflow to `data/mlruns/` and `data/mlflow.db`. Any other command can follow the image name. |
+| `.github/workflows/ci.yml` | On every push: ruff and pytest on Python 3.11 with synthetic data only (`-m "not dataset"`; nothing is downloaded), and a build of the Docker image. |
 
 ## Data
 
@@ -29,7 +54,7 @@ The data is [OpenNeuro ds002778](https://openneuro.org/datasets/ds002778/version
 recorded at UC San Diego on a 32-channel BioSemi system at 512 Hz. It is not tracked in git.
 
 ```
-python scripts/download_data.py     # fetch into data/raw/ds002778; re-running only verifies
+pdeeg download                      # fetch into data/raw/ds002778; re-running only verifies
 pdeeg recordings                    # write data/interim/recordings.parquet, one row per recording
 ```
 
@@ -146,8 +171,10 @@ cannot be tuned towards a group difference. The ranges and the reasons for them 
 ## Features
 
 ```
-pdeeg mfdfa-features                # also takes --n-jobs N and --force
-pdeeg psd-features                  # also takes --n-jobs N
+pdeeg features                      # the three below; also takes --n-jobs N and --force
+pdeeg psd-features                  # band power
+pdeeg mfdfa-features                # MFDFA with surrogates, and the QC report
+pdeeg mfdfa-curves                  # h(q) and f(alpha), for the figures
 ```
 
 `pdeeg mfdfa-features` runs MFDFA on every channel of every recording, for each series (the
@@ -197,8 +224,7 @@ Run it before `pdeeg mfdfa-features` to have the band powers included in the QC 
 ## Statistics
 
 ```
-pdeeg mfdfa-curves                  # h(q) and f(alpha) for the figures; also takes --n-jobs N
-pdeeg stats                         # also takes --n-jobs N
+pdeeg stats                         # also takes --n-jobs N and --force
 ```
 
 With 15 patients and 16 controls, the group statistics are the primary result. Everything they
@@ -232,7 +258,7 @@ and f(alpha) of every channel, series and fit range, which the feature tables do
 ## Classification
 
 ```
-pdeeg classify                      # also takes --n-jobs N
+pdeeg classify                      # also takes --n-jobs N and --force
 ```
 
 Secondary and exploratory: with about 30 people, the statistics above are the primary result.
@@ -261,7 +287,22 @@ Settings are in `configs/model.yaml`, written before any classifier was run on t
   git commit. To browse: `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
 
 Outputs: `reports/classification_results.md`, `reports/figures/classification/`, and
-`data/processed/classification_summary_ds002778-1.0.5.parquet`.
+`data/processed/classification_summary_ds002778-1.0.5.parquet`. Each evaluation's predictions,
+permutation null, weights and summary are stored in `data/processed/classification/`, from which
+`pdeeg report` writes the report again without running anything.
+
+## Research demo
+
+```
+pip install -e .[app]
+streamlit run app/streamlit_app.py  # or: make app
+```
+
+**Research demo — not a diagnostic tool.** A page that takes one BDF or EDF file with the 32
+`biosemi32` channels, cleans it with the settings of `configs/preprocessing.yaml`, and shows its
+fluctuation functions, the singularity spectrum f(alpha) of a channel, and topographies of the
+MFDFA features. It describes one recording; it has no classifier and shows no prediction
+(`tests/test_demo.py` checks that it imports none). The analysis is in `pdeeg.demo`.
 
 ## Configuration
 
@@ -288,8 +329,10 @@ pdeeg config
 
 ```
 configs/        YAML configuration
-src/pdeeg/      the package: config.py, cli.py, and data/, preprocessing/, features/,
-                models/, stats/, viz/
+src/pdeeg/      the package: config.py, cli.py, pipeline.py (the steps), stages.py (their
+                stamps), demo.py, and data/, preprocessing/, features/, models/, stats/, viz/
+app/            the Streamlit research demo
+docker/         the container's entrypoint (Dockerfile and Makefile are at the top)
 scripts/        one-off scripts
 tests/          pytest tests
 notebooks/      exploratory notebooks that import pdeeg

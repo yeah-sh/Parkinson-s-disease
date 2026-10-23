@@ -18,6 +18,21 @@ from pdeeg.stats.cluster import benjamini_hochberg
 AUDIT_ABOVE = 0.85
 
 
+def planned(config: Config) -> list[tuple[str, str, str]]:
+    """Every (task, feature set, model) that is evaluated, in configuration order.
+
+    A feature set that says nothing in a task (age and sex within patients) is left out.
+    """
+    model = config.model
+    return [
+        (task, feature_set, name)
+        for task in model.tasks
+        for feature_set in model.feature_sets
+        if applicable(config, task, feature_set)
+        for name in MODELS
+    ]
+
+
 def run_classification(
     config: Config,
     recordings: pd.DataFrame,
@@ -26,20 +41,16 @@ def run_classification(
     n_jobs: int | None = None,
     progress: Callable[[Evaluation], None] | None = None,
 ) -> list[Evaluation]:
-    """Evaluate every model on every applicable task and feature set, in configuration order."""
-    model = config.model
-    jobs = model.n_jobs if n_jobs is None else n_jobs
-    results = []
-    for task in model.tasks:
-        for feature_set in model.feature_sets:
-            if not applicable(config, task, feature_set):
-                continue
-            data = task_data(config, recordings, tables, task, feature_set)
-            for name in MODELS:
-                result = evaluate(data, task, feature_set, name, config, n_jobs=jobs)
-                if progress is not None:
-                    progress(result)
-                results.append(result)
+    """Evaluate everything :func:`planned` lists, in that order."""
+    jobs = config.model.n_jobs if n_jobs is None else n_jobs
+    results, data = [], {}
+    for task, feature_set, name in planned(config):
+        if (task, feature_set) not in data:
+            data[task, feature_set] = task_data(config, recordings, tables, task, feature_set)
+        result = evaluate(data[task, feature_set], task, feature_set, name, config, n_jobs=jobs)
+        if progress is not None:
+            progress(result)
+        results.append(result)
     return results
 
 
