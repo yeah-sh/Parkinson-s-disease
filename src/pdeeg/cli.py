@@ -166,6 +166,55 @@ def _mfdfa_features(config: Config, n_jobs: int | None, force: bool) -> int:
     return 0
 
 
+def _mfdfa_curves(config: Config, n_jobs: int | None) -> int:
+    from pdeeg.features.curves import build_curves_table, curves_path
+
+    recordings = _read_recordings(config)
+    if recordings is None:
+        return 1
+    jobs = config.mfdfa.extraction.n_jobs if n_jobs is None else n_jobs
+    curves = build_curves_table(config, recordings, n_jobs=jobs)
+    path = curves_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    curves.to_parquet(path, index=False)
+    print(f"h(q) and f(alpha): {len(curves)} rows -> {path}")
+    return 0
+
+
+def _stats(config: Config, n_jobs: int | None) -> int:
+    import pandas as pd
+
+    from pdeeg.features.curves import curves_path
+    from pdeeg.features.tables import table_paths
+    from pdeeg.stats.analysis import run_analysis, write_results
+    from pdeeg.stats.features import StatsError
+    from pdeeg.stats.report import write_report
+
+    recordings = _read_recordings(config)
+    if recordings is None:
+        return 1
+    tables = {}
+    for kind in ("mfdfa", "psd"):
+        path = table_paths(config, kind)["long"]
+        if not path.is_file():
+            print(f"pdeeg: {path} not found; run `pdeeg {kind}-features` first", file=sys.stderr)
+            return 1
+        tables[kind] = pd.read_parquet(path)
+    try:
+        results = run_analysis(config, recordings, tables, n_jobs=n_jobs)
+    except StatsError as exc:
+        print(f"pdeeg: {exc}", file=sys.stderr)
+        return 1
+    for name, path in write_results(config, results).items():
+        print(f"{name.capitalize()} -> {path}")
+    curves = curves_path(config)
+    if not curves.is_file():
+        print(f"pdeeg: {curves} not found; the report leaves out the h(q) figure", file=sys.stderr)
+    curves_table = pd.read_parquet(curves) if curves.is_file() else None
+    print(f"Report -> {write_report(config, results, curves_table)}")
+    return 0
+
+
 def _plain(value: Any) -> Any:
     """Reduce ``dataclasses.asdict`` output to types YAML can serialise."""
     if isinstance(value, dict):
@@ -238,6 +287,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="processes to use (default: inspection.n_jobs in the MFDFA config)",
     )
+    curves = commands.add_parser(
+        "mfdfa-curves", help="h(q) and f(alpha) of every channel of every recording, for figures"
+    )
+    curves.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="recordings to analyse in parallel (default: extraction.n_jobs in the MFDFA config)",
+    )
+    stats = commands.add_parser(
+        "stats", help="group and paired cluster tests of the features, and the results report"
+    )
+    stats.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="tests to run in parallel (default: n_jobs in the stats config)",
+    )
     return parser
 
 
@@ -262,6 +329,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _mfdfa_features(config, args.n_jobs, args.force)
     if args.command == "psd-features":
         return _psd_features(config, args.n_jobs)
+    if args.command == "mfdfa-curves":
+        return _mfdfa_curves(config, args.n_jobs)
+    if args.command == "stats":
+        return _stats(config, args.n_jobs)
     yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
     return 0
 

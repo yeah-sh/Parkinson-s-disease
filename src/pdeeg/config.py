@@ -260,6 +260,58 @@ class ModelConfig:
     tracking: TrackingConfig
 
 
+# --- stats.yaml --------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StatsFeaturesConfig:
+    primary: tuple[str, ...]
+    exploratory_tables: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BetweenConfig:
+    pd_session: str
+    hc_session: str
+
+
+@dataclass(frozen=True)
+class PairedConfig:
+    first: str
+    second: str
+    exclude_subjects: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ClusterConfig:
+    adjacency: str
+    n_permutations: int
+    cluster_forming_p: float
+
+
+@dataclass(frozen=True)
+class BootstrapConfig:
+    n_resamples: int
+    confidence: float
+
+
+@dataclass(frozen=True)
+class StatsConfig:
+    seed: int
+    features: StatsFeaturesConfig
+    segments: str
+    between: BetweenConfig
+    paired: PairedConfig
+    cluster: ClusterConfig
+    fdr_q: float
+    covariates: tuple[str, ...]
+    bootstrap: BootstrapConfig
+    curves: tuple[str, ...]
+    report: Path
+    figures_dir: Path
+    n_jobs: int
+
+
 # --- everything --------------------------------------------------------------------------------
 
 
@@ -272,6 +324,7 @@ class Config:
     mfdfa: MfdfaConfig
     psd: PsdConfig
     model: ModelConfig
+    stats: StatsConfig
 
 
 # Section name -> (file relative to the config directory, schema).
@@ -281,6 +334,7 @@ _SECTIONS: dict[str, tuple[str, type]] = {
     "mfdfa": ("features/mfdfa.yaml", MfdfaConfig),
     "psd": ("features/psd.yaml", PsdConfig),
     "model": ("model.yaml", ModelConfig),
+    "stats": ("stats.yaml", StatsConfig),
 }
 
 
@@ -444,6 +498,51 @@ def _validate(config: Config) -> None:
         raise ConfigError(
             f"preprocessing.ica.method: expected infomax or picard, got {ica.method!r}"
         )
+    _validate_stats(config)
+
+
+def _validate_stats(config: Config) -> None:
+    """Checks of stats.yaml against itself and the session labels of data.yaml.
+
+    Whether the feature names exist in the feature tables is checked by
+    :func:`pdeeg.stats.features.catalogue`, which knows how the tables name them.
+    """
+    stats = config.stats
+    groups = {name: session.group for name, session in config.data.sessions.items()}
+    for where, session in (
+        ("between.pd_session", stats.between.pd_session),
+        ("between.hc_session", stats.between.hc_session),
+        ("paired.first", stats.paired.first),
+        ("paired.second", stats.paired.second),
+    ):
+        if session not in groups:
+            raise ConfigError(
+                f"stats.{where}: unknown session {session!r}; data.sessions defines "
+                f"{', '.join(groups)}"
+            )
+    if groups[stats.between.pd_session] == groups[stats.between.hc_session]:
+        raise ConfigError("stats.between: the two sessions must belong to different groups")
+    paired = stats.paired
+    if paired.first == paired.second or groups[paired.first] != groups[paired.second]:
+        raise ConfigError(
+            "stats.paired: first and second must be different sessions of the same group"
+        )
+    if stats.segments not in ("full", "clean"):
+        raise ConfigError(f"stats.segments: expected full or clean, got {stats.segments!r}")
+    unknown = sorted(set(stats.features.exploratory_tables) - {"mfdfa", "psd"})
+    if unknown:
+        raise ConfigError(f"stats.features.exploratory_tables: unknown table(s) {unknown}")
+    if len(set(stats.features.primary)) != len(stats.features.primary):
+        raise ConfigError("stats.features.primary: a feature is listed twice")
+    if stats.cluster.n_permutations < 1 or stats.bootstrap.n_resamples < 1:
+        raise ConfigError("stats: n_permutations and n_resamples must be at least 1")
+    for where, value in (
+        ("cluster.cluster_forming_p", stats.cluster.cluster_forming_p),
+        ("fdr_q", stats.fdr_q),
+        ("bootstrap.confidence", stats.bootstrap.confidence),
+    ):
+        if not 0 < value < 1:
+            raise ConfigError(f"stats.{where}: must lie between 0 and 1, got {value}")
 
 
 def resolve_config_dir(config_dir: str | os.PathLike[str] | None = None) -> Path:

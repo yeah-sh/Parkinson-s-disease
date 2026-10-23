@@ -41,3 +41,37 @@ def test_mfdfa_settings_are_validated(tmp_path, old, new, message):
 
     with pytest.raises(ConfigError, match=message):
         load_config(CONFIG_DIR, overrides={"mfdfa": changed})
+
+
+def test_stats_config_holds_the_pre_registered_primary_features():
+    stats = load_config(CONFIG_DIR).stats
+
+    assert stats.features.primary == (
+        "envelope_beta_main_h2",
+        "envelope_beta_main_delta_alpha",
+        "broadband_long_delta_alpha",
+    )
+    assert stats.cluster.n_permutations >= 5000
+    assert stats.report.is_absolute()
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ('pd_session: "off"', 'pd_session: "later"', "unknown session"),
+        ('pd_session: "off"', "pd_session: hc", "different groups"),
+        ('second: "on"', 'second: "off"', "same group"),
+        ("segments: clean", "segments: tidy", "full or clean"),
+        ("exploratory_tables: [mfdfa, psd]", "exploratory_tables: [eeg]", "unknown table"),
+        ("cluster_forming_p: 0.05", "cluster_forming_p: 5", "between 0 and 1"),
+        ("fdr_q: 0.05", "fdr: 0.05", "unknown key"),
+    ],
+)
+def test_stats_settings_are_validated(tmp_path, old, new, message):
+    text = (CONFIG_DIR / "stats.yaml").read_text(encoding="utf-8")
+    assert old in text
+    changed = tmp_path / "stats.yaml"
+    changed.write_text(text.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(CONFIG_DIR, overrides={"stats": changed})

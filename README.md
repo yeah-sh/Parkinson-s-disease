@@ -185,7 +185,7 @@ Three things about these tables:
 - **Regions.** A region's value is the mean of its channels' values. The five regions (frontal,
   central, temporal, parietal, occipital) are defined in `configs/data.yaml`.
 - **Runtime.** The surrogates take most of the time: 117,760 IAAFT surrogates of 92,160 samples,
-  about 5 minutes per recording on 18 processes. Every MFDFA run is stored per recording in
+  about 5 minutes per recording on 16 processes. Every MFDFA run is stored per recording in
   `data/interim/mfdfa/`, a recording is skipped when its stored runs are current, and the tables
   are rebuilt from the stored runs in seconds.
 
@@ -193,6 +193,41 @@ Three things about these tables:
 (long, with `band` in place of the MFDFA columns) and its `_wide` companion: log10 relative band
 power from the Welch spectrum, delta to gamma, per channel and region, again `full` and `clean`.
 Run it before `pdeeg mfdfa-features` to have the band powers included in the QC report.
+
+## Statistics
+
+```
+pdeeg mfdfa-curves                  # h(q) and f(alpha) for the figures; also takes --n-jobs N
+pdeeg stats                         # also takes --n-jobs N
+```
+
+With 15 patients and 16 controls, the group statistics are the primary result. Everything they
+do is set in `configs/stats.yaml`, which was written, and is to be kept, as a pre-registration:
+the three primary features (`h2` and `delta_alpha` of the beta envelope, broadband `delta_alpha`
+on the long range) were fixed before any group was compared, and every other feature of the
+MFDFA and band-power wide tables is exploratory. The report prints the file's SHA-256, so a
+later change to it is visible.
+
+Every feature goes through four analyses, one value per channel:
+
+| Analysis | What | Test |
+|---|---|---|
+| `pd_vs_hc` | Patients off medication (one session per patient, configurable) against controls | Two-sample cluster-based permutation test |
+| `pd_vs_hc_adjusted` | The same on residuals after regressing out age and sex | Same |
+| `off_vs_on` | OFF - ON within patients, without `sub-pd6` and `sub-pd16`, whose ON sessions were exported already preprocessed | One-sample cluster test on the differences (sign flips; exact for 13 pairs) |
+| `off_vs_on_all_pairs` | The same with all 15 patients | Same |
+
+The cluster tests are MNE's, with channel neighbours from the FieldTrip `biosemi32` template:
+Student's t per channel, clusters of neighbouring channels above the two-sided p = 0.05 t
+threshold, 10,000 relabellings, and a separate seeded random stream per test. Effect sizes are
+Hedges' g per channel (g_z for the paired differences). Benjamini-Hochberg runs over the cluster
+p-values of the primary family in both contrasts, and separately over the exploratory family;
+age (Welch) and sex (Fisher) are compared between the groups.
+
+Outputs: `reports/stats_results.md` with its figures in `reports/figures/stats/`, and the tables
+`data/processed/stats_{tests,clusters,channels,demographics}_ds002778-1.0.5.parquet`.
+`pdeeg mfdfa-curves` writes `data/processed/mfdfa_curves_ds002778-1.0.5.parquet`: h(q), alpha
+and f(alpha) of every channel, series and fit range, which the feature tables do not keep.
 
 ## Configuration
 
@@ -204,6 +239,7 @@ Every setting, including every path, lives in `configs/`. Nothing is hard-coded 
 | `configs/preprocessing.yaml` | Cropping, filtering, referencing, ICA, bad-stretch marking, QC limits |
 | `configs/features/mfdfa.yaml` | MFDFA moment orders, detrending, envelope bands, fit ranges and why, bad stretches, surrogates, outputs, the scaling inspection |
 | `configs/features/psd.yaml` | Spectral estimation and frequency bands |
+| `configs/stats.yaml` | Pre-registered primary features, who is compared, cluster tests, FDR, covariates, figures |
 | `configs/model.yaml` | Classification tasks, cross-validation, experiment tracking |
 
 The config directory is taken from `--config-dir`, then the `PDEEG_CONFIG_DIR` environment

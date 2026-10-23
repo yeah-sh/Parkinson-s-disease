@@ -1,0 +1,90 @@
+# Statistical analysis of the feature tables (pdeeg.stats, `pdeeg stats`).
+#
+# PRE-REGISTRATION. Written on 2026-10-23, before the MFDFA feature tables existed and before any
+# feature had been compared between groups or sessions. The three primary features were set in the
+# task description; every other choice below was made from the study design and the electrode
+# geometry alone. A change made here after the results have been seen turns the analysis it affects
+# into an exploratory one, and the report has to say so.
+
+seed: 20261023        # every permutation and bootstrap; each test gets its own stream from it
+
+# --- What is compared ----------------------------------------------------------------------------
+# A feature is named <series>_<fit range>_<feature> as in the MFDFA wide table, where the series is
+# broadband or envelope_<band>, or <feature>_<band> as in the band-power wide table.
+features:
+  # The confirmatory family. Broadband delta_alpha is that of the long fit range (0.3 to 1 s): on
+  # the short range the spectrum width is the low-pass filter's (configs/features/mfdfa.yaml).
+  primary:
+    - envelope_beta_main_h2
+    - envelope_beta_main_delta_alpha
+    - broadband_long_delta_alpha
+  # Every other feature of these tables' wide format is exploratory: the MFDFA features under
+  # wide_features in configs/features/mfdfa.yaml, and the band powers of configs/features/psd.yaml.
+  exploratory_tables: [mfdfa, psd]
+
+# Each recording was analysed with every window ("full") and without the windows that touch a
+# stretch marked bad ("clean"). A bad stretch exceeds 150 µV peak-to-peak in some channel, and such
+# windows dominate the moments of positive q, so the clean values are used. 22 of the 46 recordings
+# have no bad stretch, and for them the two are the same.
+segments: clean
+
+# --- Who is compared -----------------------------------------------------------------------------
+# PD vs HC, between participants: one recording per participant.
+between:
+  pd_session: "off"   # the patients' session that is used; "on" also works
+  hc_session: hc
+# PD OFF vs ON, within patients, on the differences first - second.
+paired:
+  first: "off"
+  second: "on"
+  # Left out of the main paired analysis; a sensitivity analysis keeps them. The on-medication
+  # sessions of these two patients were exported from already preprocessed EEGLAB data
+  # (participants.tsv notes; high-passed, no mains peak, unlike every other recording), so their
+  # OFF - ON difference mixes the medication with a different processing history. Decided from
+  # that provenance alone.
+  exclude_subjects: [pd6, pd16]
+
+# A participant or pair with a missing value (NaN) in any channel of a feature is left out of the
+# tests of that feature only; the report gives the number used in every test.
+
+# --- Cluster-based permutation tests across channels ---------------------------------------------
+cluster:
+  # Channel neighbours: the FieldTrip template for the biosemi32 cap that ships with MNE (3 to 8
+  # neighbours per channel, median 6, none further apart than 7.7 cm). A Delaunay triangulation of
+  # the montage was the alternative; it leaves Oz without PO3 and PO4 as neighbours.
+  adjacency: biosemi32
+  # Random label permutations (PD vs HC) or sign flips (OFF vs ON). When fewer distinct sign flips
+  # exist than this, all of them are used (an exact test): 13 pairs have 4096 up to symmetry.
+  n_permutations: 10000
+  # Statistic per channel: Student's t, two-sample with pooled variance (PD - HC) or one-sample on
+  # the differences (OFF - ON), two-sided. A channel enters a cluster when |t| exceeds the t
+  # quantile of this two-sided p at the test's degrees of freedom; a cluster's mass is the sum of
+  # its t-values, and its p-value is the share of permutations whose largest |mass| reaches it.
+  cluster_forming_p: 0.05
+
+# Benjamini-Hochberg over the cluster p-values of one family (primary, or exploratory) in both
+# contrasts, PD vs HC and OFF vs ON. A test that finds no cluster counts as one p-value of 1. In a
+# sensitivity analysis, its test takes the place of the main one in the family. A cluster is called
+# significant when its q-value is below fdr_q.
+fdr_q: 0.05
+
+# --- Confounds -----------------------------------------------------------------------------------
+# Age is compared between the groups with Welch's t-test, sex with Fisher's exact test. The PD vs HC
+# tests are then repeated on the residuals of a least-squares fit of every channel's values on these
+# covariates (with an intercept, over both groups together), and both versions are reported. Sex
+# enters as 1 for "m" and 0 for "f". Age and sex do not change within a patient, so the paired
+# analysis is not adjusted.
+covariates: [age, sex]
+
+# --- Descriptive statistics and figures ----------------------------------------------------------
+# 95 % percentile bootstrap intervals of group means, resampling participants (pairs for OFF vs ON).
+bootstrap:
+  n_resamples: 2000
+  confidence: 0.95
+# Series whose h(q) and f(alpha) are drawn: the mean over all 32 channels of each recording, then
+# the group mean. Descriptive only; nothing is tested on these curves.
+curves: [envelope_beta_main, broadband_long]
+
+report: reports/stats_results.md
+figures_dir: reports/figures/stats
+n_jobs: 8             # tests run in parallel; does not affect the results
