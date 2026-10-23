@@ -48,6 +48,8 @@ class Topography:
     kind: str
     limits: tuple[float, float]
     mask: np.ndarray | None = None
+    # "nearest" draws every channel's value as a flat patch, for values shared by a region.
+    interpolation: str = "cubic"
 
 
 def montage_info(channels: Sequence[str], montage: str) -> mne.Info:
@@ -90,6 +92,7 @@ def plot_topographies(
                 mask_params=_MASK_STYLE,
                 contours=0,
                 sensors=True,
+                image_interp=panel.interpolation,
             )
             axes.set_title(panel.title, fontsize=8.5, color=INK_SECONDARY)
             bar = figure.colorbar(image, ax=axes, orientation="horizontal", shrink=0.75, pad=0.03)

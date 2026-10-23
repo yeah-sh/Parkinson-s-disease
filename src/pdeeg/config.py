@@ -234,13 +234,47 @@ class PsdConfig:
 class TaskConfig:
     positive: tuple[str, ...]
     negative: tuple[str, ...]
+    paired: bool
+    exclude_subjects: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LogisticConfig:
+    C: tuple[float, ...]
+    l1_ratio: tuple[float, ...]
+    max_iter: int
+
+
+@dataclass(frozen=True)
+class SvmConfig:
+    C: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class BoostingConfig:
+    n_estimators: tuple[int, ...]
+    max_depth: tuple[int, ...]
+    learning_rate: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class ClassifiersConfig:
+    logistic_regression: LogisticConfig
+    linear_svm: SvmConfig
+    gradient_boosting: BoostingConfig
 
 
 @dataclass(frozen=True)
 class CvConfig:
-    scheme: str
     group_key: str
+    outer: str
+    outer_folds: int
+    inner_folds: int
+    inner_scoring: str
+    split_repeats: int
     n_permutations: int
+    n_bootstrap: int
+    confidence: float
 
 
 @dataclass(frozen=True)
@@ -253,11 +287,17 @@ class TrackingConfig:
 @dataclass(frozen=True)
 class ModelConfig:
     random_state: int
+    segments: str
+    level: str
+    channel_k: tuple[int, ...]
     tasks: dict[str, TaskConfig]
-    feature_sets: tuple[str, ...]
-    classifiers: tuple[str, ...]
+    feature_sets: dict[str, tuple[str, ...]]
+    classifiers: ClassifiersConfig
     cv: CvConfig
     tracking: TrackingConfig
+    report: Path
+    figures_dir: Path
+    n_jobs: int
 
 
 # --- stats.yaml --------------------------------------------------------------------------------
@@ -499,6 +539,49 @@ def _validate(config: Config) -> None:
             f"preprocessing.ica.method: expected infomax or picard, got {ica.method!r}"
         )
     _validate_stats(config)
+    _validate_model(config)
+
+
+def _validate_model(config: Config) -> None:
+    """Checks of model.yaml that the schema cannot express."""
+    model = config.model
+    sessions = config.data.sessions
+    groups = {session.condition: session.group for session in sessions.values()}
+    for name, task in model.tasks.items():
+        if set(task.positive) & set(task.negative):
+            raise ConfigError(f"model.tasks.{name}: a condition is on both sides")
+        if task.paired and len({groups[c] for c in (*task.positive, *task.negative)}) != 1:
+            raise ConfigError(f"model.tasks.{name}: a paired task compares conditions of one group")
+    for name, tables in model.feature_sets.items():
+        unknown = sorted(set(tables) - {"psd", "mfdfa", "confounds"})
+        if unknown or not tables:
+            raise ConfigError(
+                f"model.feature_sets.{name}: expected tables among psd, mfdfa, confounds, "
+                f"got {list(tables)}"
+            )
+    if model.level not in ("region", "channel"):
+        raise ConfigError(f"model.level: expected region or channel, got {model.level!r}")
+    if model.segments not in ("full", "clean"):
+        raise ConfigError(f"model.segments: expected full or clean, got {model.segments!r}")
+    cv = model.cv
+    if cv.outer not in ("stratified_group_kfold", "leave_one_subject_out"):
+        raise ConfigError(
+            f"model.cv.outer: expected stratified_group_kfold or leave_one_subject_out, "
+            f"got {cv.outer!r}"
+        )
+    if cv.inner_scoring not in ("roc_auc", "balanced_accuracy"):
+        raise ConfigError(
+            f"model.cv.inner_scoring: expected roc_auc or balanced_accuracy, "
+            f"got {cv.inner_scoring!r}"
+        )
+    if min(cv.outer_folds, cv.inner_folds) < 2:
+        raise ConfigError("model.cv: outer_folds and inner_folds must be at least 2")
+    if min(cv.n_permutations, cv.n_bootstrap) < 1 or cv.split_repeats < 0:
+        raise ConfigError("model.cv: n_permutations and n_bootstrap must be at least 1")
+    if not 0 < cv.confidence < 1:
+        raise ConfigError(f"model.cv.confidence: must lie between 0 and 1, got {cv.confidence}")
+    if not model.channel_k or min(model.channel_k) < 1:
+        raise ConfigError("model.channel_k: needs at least one k of 1 or more")
 
 
 def _validate_stats(config: Config) -> None:

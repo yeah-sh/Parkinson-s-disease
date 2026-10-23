@@ -215,6 +215,49 @@ def _stats(config: Config, n_jobs: int | None) -> int:
     return 0
 
 
+def _classify(config: Config, n_jobs: int | None) -> int:
+    import pandas as pd
+
+    from pdeeg.features.tables import table_paths
+    from pdeeg.models.classify import run_classification, summary_table
+    from pdeeg.models.report import write_report
+    from pdeeg.models.tracking import Tracker
+
+    recordings = _read_recordings(config)
+    if recordings is None:
+        return 1
+    inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
+    for kind, path in inputs.items():
+        if not path.is_file():
+            print(f"pdeeg: {path} not found; run `pdeeg {kind}-features` first", file=sys.stderr)
+            return 1
+    tables = {kind: pd.read_parquet(path) for kind, path in inputs.items()}
+    tracker = Tracker(config, inputs)
+
+    def show(result) -> None:
+        run_id = tracker.log(result)
+        observed = result.observed
+        print(
+            f"{result.task} / {result.feature_set} / {result.model}: balanced accuracy "
+            f"{observed['balanced_accuracy']:.2f} "
+            f"(p = {result.p_values['balanced_accuracy']:.3f}), "
+            f"AUC {observed['roc_auc']:.2f} - MLflow run {run_id}",
+            flush=True,
+        )
+
+    results = run_classification(config, recordings, tables, n_jobs=n_jobs, progress=show)
+    table = summary_table(results, config)
+    dataset = config.data.dataset
+    name = f"classification_summary_{dataset.id}-{dataset.version}.parquet"
+    summary = config.data.paths.processed / name
+    table.to_parquet(summary, index=False)
+    print(f"Summary -> {summary}")
+    files = write_report(config, results, table)
+    tracker.log_summary([*files, summary])
+    print(f"Report -> {files[0]}")
+    return 0
+
+
 def _plain(value: Any) -> Any:
     """Reduce ``dataclasses.asdict`` output to types YAML can serialise."""
     if isinstance(value, dict):
@@ -305,6 +348,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="tests to run in parallel (default: n_jobs in the stats config)",
     )
+    classify = commands.add_parser(
+        "classify", help="nested cross-validated classification, tracked with MLflow, and report"
+    )
+    classify.add_argument(
+        "--n-jobs",
+        type=int,
+        default=None,
+        help="permutations to run in parallel (default: n_jobs in the model config)",
+    )
     return parser
 
 
@@ -333,6 +385,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _mfdfa_curves(config, args.n_jobs)
     if args.command == "stats":
         return _stats(config, args.n_jobs)
+    if args.command == "classify":
+        return _classify(config, args.n_jobs)
     yaml.safe_dump(_plain(dataclasses.asdict(config)), sys.stdout, sort_keys=False)
     return 0
 

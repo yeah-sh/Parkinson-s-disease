@@ -1,26 +1,82 @@
-# Classification and experiment tracking.
-# Provisional defaults, written before the modelling code exists; revisit when it lands.
+# Classification (pdeeg.models, `pdeeg classify`): secondary and exploratory.
+# Written on 2026-10-23, before any classifier was run on the data. With 15 patients and 16
+# controls the curators of ds002778 warn that classifying patients against controls is
+# statistically fragile; the group statistics of configs/stats.yaml are the primary result.
 
-random_state: 42
+random_state: 20261023
+
+# Which values of the feature tables are used: as in stats.yaml, the windows that touch a stretch
+# marked bad are left out.
+segments: clean
+# "region": each feature averaged over the channels of a region (data.yaml), 5 values per feature.
+# "channel": one value per channel, and then a univariate selection (SelectKBest, ANOVA F) of
+# channel_k features inside every training fold, k tuned in the inner loop.
+level: region
+channel_k: [10, 30, 100]
 
 # Each task contrasts two sets of conditions (names come from sessions in data.yaml).
 tasks:
-  pd_vs_hc:           # unmedicated patients against controls: one recording per participant
+  pd_vs_hc:           # (A) unmedicated patients against controls: one recording per participant
     positive: [PD_OFF]
     negative: [HC]
-  off_vs_on:          # paired: the same 15 patients in both classes
+    paired: false
+    exclude_subjects: []
+  off_vs_on:          # (B) the same patients in both classes
     positive: [PD_OFF]
     negative: [PD_ON]
+    # Within patients: each patient's features are centred on the mean of their own two
+    # recordings, so a classifier decides which of a patient's two recordings is OFF (chance
+    # 50 %), and labels are permuted within patients. The centring uses nothing but that one
+    # patient's two recordings, and no label.
+    paired: true
+    # Their ON sessions were exported already preprocessed (configs/stats.yaml), so a classifier
+    # could learn the processing instead of the medication.
+    exclude_subjects: [pd6, pd16]
 
-feature_sets: [psd, mfdfa]
-classifiers: [logistic_regression, linear_svm]
+# Feature sets of the ablation, by the tables they draw on: "psd" and "mfdfa" are the wide
+# feature tables, "confounds" is age and sex (1 for m, 0 for f). Age and sex do not change within
+# a patient, so a set of confounds alone is not run for a paired task.
+feature_sets:
+  psd: [psd]
+  mfdfa: [mfdfa]
+  psd_mfdfa: [psd, mfdfa]
+  age_sex: [confounds]
 
-# Splits are always grouped by participant so that no person's epochs, or their OFF and ON
-# sessions, fall on both sides of a split. The legacy notebooks split at epoch level.
+# Inner-loop grids. Every model follows a StandardScaler (and the selection, for channels) in one
+# Pipeline, so all of it is fitted on training folds only.
+classifiers:
+  logistic_regression:    # saga solver; l1_ratio 0 is L2, 1 is L1, 0.5 elastic net
+    C: [0.01, 0.1, 1.0]
+    l1_ratio: [0.0, 0.5, 1.0]
+    max_iter: 5000
+  linear_svm:             # SVC with a linear kernel; its decision function is the score
+    C: [0.001, 0.01, 0.1, 1.0]
+  gradient_boosting:      # small: 100 stumps or depth-2 trees
+    n_estimators: [100]
+    max_depth: [1, 2]
+    learning_rate: [0.1]
+
 cv:
-  scheme: leave_one_subject_out
-  group_key: participant_id
-  n_permutations: 1000
+  group_key: participant_id   # every split is by participant: no person is in train and test
+  # Outer loop. Leave-one-subject-out was timed first: one nested run of task A on 31 participants
+  # and 130 features took 104 s with logistic regression and 321 s with gradient boosting (with
+  # the MFDFA extraction running alongside), and every p-value needs 1000 such runs, which comes
+  # to weeks of CPU over the 21 task, feature set and model combinations. Stratified 5-fold grouped by participant needs about a sixth of it, keeps 6 or
+  # 7 test participants and the class ratio in every fold, and is used for the scores and their
+  # permutation nulls alike.
+  outer: stratified_group_kfold   # or leave_one_subject_out
+  outer_folds: 5
+  inner_folds: 3                  # grouped and stratified too
+  # The metric that is reported. ROC AUC was tried first, for being smoother on folds of 8 to 10
+  # people, but on synthetic data (tests/test_models.py) it chose models so regularised that
+  # their scores ranked people well while their intercept put everyone in one class.
+  inner_scoring: balanced_accuracy
+  # The scores are from one outer split. The analysis is repeated on this many other splits to
+  # show how much the choice of split alone moves balanced accuracy; no p-value is taken there.
+  split_repeats: 10
+  n_permutations: 1000            # every one repeats the whole nested cross-validation
+  n_bootstrap: 2000               # over participants, on the out-of-fold predictions
+  confidence: 0.95
 
 # MLflow 3.17 no longer accepts a plain ./mlruns directory as the tracking store, so runs are
 # recorded in a SQLite database and only the artifacts go to a directory.
@@ -28,3 +84,7 @@ tracking:
   db: mlflow.db       # SQLite tracking database
   artifacts: mlruns   # artifact store
   experiment: pdeeg
+
+report: reports/classification_results.md
+figures_dir: reports/figures/classification
+n_jobs: 18            # permutations run in parallel; does not affect the results

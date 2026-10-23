@@ -229,6 +229,40 @@ Outputs: `reports/stats_results.md` with its figures in `reports/figures/stats/`
 `pdeeg mfdfa-curves` writes `data/processed/mfdfa_curves_ds002778-1.0.5.parquet`: h(q), alpha
 and f(alpha) of every channel, series and fit range, which the feature tables do not keep.
 
+## Classification
+
+```
+pdeeg classify                      # also takes --n-jobs N
+```
+
+Secondary and exploratory: with about 30 people, the statistics above are the primary result.
+Settings are in `configs/model.yaml`, written before any classifier was run on the data.
+
+- **Tasks.** (A) PD OFF against controls, one recording per participant. (B) PD OFF against ON
+  within patients, without `sub-pd6` and `sub-pd16`: each patient's features are centred on the
+  mean of their own two recordings, so the question is which of the two is OFF (chance 50 %).
+- **Features.** Band power, MFDFA, both, and age + sex alone as a confound baseline (task A
+  only: age and sex do not change between sessions). Region averages by default; at channel
+  level, `SelectKBest` runs inside every training fold.
+- **Models.** Logistic regression (saga; L2, L1 or elastic net), linear SVM, and gradient
+  boosting with 100 stumps or depth-2 trees.
+- **Evaluation.** Every split is by participant. Outer loop: stratified 5-fold grouped by
+  participant; leave-one-subject-out was timed and would have needed weeks of CPU with the
+  permutations (the numbers are in `configs/model.yaml`). Inner loop: grouped 3-fold
+  `GridSearchCV` around a Pipeline of scaling, (selection) and the model, scored by balanced
+  accuracy. Balanced accuracy, ROC AUC, sensitivity and specificity on the out-of-fold
+  predictions, with 95 % bootstrap intervals over participants, permutation p-values from 1000
+  relabellings that each repeat the whole nested procedure (within patients for task B), and the
+  spread over 10 other outer splits.
+- **Leakage.** Every outer and inner split is checked at run time, and `tests/test_leakage.py`
+  checks every splitter of every task.
+- **Tracking.** One MLflow run per task, feature set and model in `mlflow.db` (artifacts in
+  `mlruns/`), tagged with the configuration digest, dataset version, feature-table digests and
+  git commit. To browse: `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
+
+Outputs: `reports/classification_results.md`, `reports/figures/classification/`, and
+`data/processed/classification_summary_ds002778-1.0.5.parquet`.
+
 ## Configuration
 
 Every setting, including every path, lives in `configs/`. Nothing is hard-coded in the package.
@@ -240,7 +274,7 @@ Every setting, including every path, lives in `configs/`. Nothing is hard-coded 
 | `configs/features/mfdfa.yaml` | MFDFA moment orders, detrending, envelope bands, fit ranges and why, bad stretches, surrogates, outputs, the scaling inspection |
 | `configs/features/psd.yaml` | Spectral estimation and frequency bands |
 | `configs/stats.yaml` | Pre-registered primary features, who is compared, cluster tests, FDR, covariates, figures |
-| `configs/model.yaml` | Classification tasks, cross-validation, experiment tracking |
+| `configs/model.yaml` | Classification tasks, feature sets, model grids, nested cross-validation, permutations, experiment tracking |
 
 The config directory is taken from `--config-dir`, then the `PDEEG_CONFIG_DIR` environment
 variable, then `./configs`. Relative paths in the YAML files are resolved against the parent of the
