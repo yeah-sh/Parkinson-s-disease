@@ -1,341 +1,322 @@
-# pdeeg
+# pdeeg: multifractal analysis of resting-state EEG in Parkinson's disease
 
-Characterising and classifying Parkinson's disease (PD) from resting-state EEG: PD against healthy
-controls, and PD off against on medication. The main features come from Multifractal Detrended
-Fluctuation Analysis (MFDFA); band power from the power spectrum is the baseline.
+> **Research code, not a diagnostic tool.** Nothing in this repository is validated for deciding
+> whether a person has Parkinson's disease, and it must not be used that way. See
+> [Limitations](#limitations) and [MODEL_CARD.md](MODEL_CARD.md).
 
-**Status:** every stage is written, and `pdeeg all` runs them from download to reports. The MFDFA
-code is validated on synthetic signals, the fit ranges were chosen without sight of the group
-labels, and the group statistics (the primary analysis) and the classification (exploratory)
-were fixed in `configs/stats.yaml` and `configs/model.yaml` before any group was compared.
+`pdeeg` asks whether the temporal structure of resting-state EEG differs between people with
+Parkinson's disease (PD) and healthy controls (HC), and, within patients, between sessions off and
+on medication. The main features come from multifractal detrended fluctuation analysis (MFDFA) of
+the EEG and of its theta, alpha and beta amplitude envelopes, each judged against surrogate data.
+Spectral band power is the baseline. The primary analysis is a set of pre-registered,
+cluster-based permutation tests between groups. Classification is secondary and exploratory, and
+every one of its splits is made by participant.
 
-## Setup
+**Status.** Preprocessing and the label-blind scaling inspection are complete, and their reports
+are in [`reports/`](reports/). The MFDFA feature extraction, the group statistics and the
+classification have not been run yet, so this README has no group-level or classification
+results.
+
+## Credit
+
+This project re-engineers
+[`Sankhadip-007/Detecttion-of-Parkinson-s-Disease-using-machine-learning-and-deep-learning`](https://github.com/Sankhadip-007/Detecttion-of-Parkinson-s-Disease-using-machine-learning-and-deep-learning)
+by [Sankhadip Bera](https://github.com/Sankhadip-007). The question, the choice of dataset and the
+first pipeline come from that repository. This one started as a byte-identical copy of its
+notebooks (commit `1ab0029`). They were moved to `legacy/` in `5d3d758` and removed in `e3820f3`,
+and are still in the history. [What changed](#what-changed-from-the-original-project) below says
+what was rebuilt and why.
+
+## Dataset
+
+[OpenNeuro ds002778](https://openneuro.org/datasets/ds002778/versions/1.0.5), version 1.0.5:
+*UC San Diego Resting State EEG Data from Patients with Parkinson's Disease*, by Alexander P.
+Rockhill, Nicko Jackson, Jobi George, Adam Aron and Nicole C. Swann
+(doi:10.18112/openneuro.ds002778.v1.0.5, licence CC0). It has 16 controls with one session each
+and 15 patients with an off- and an on-medication session: 46 recordings with 32 scalp channels at
+512 Hz. The data is not tracked in git. `pdeeg download` fetches it into `data/raw/ds002778/`.
+
+The dataset's README (`data/raw/ds002778/README`) makes three requests of anyone using it:
+
+- **Contact the curators before submitting a manuscript.** The address is in that README.
+- **Do not classify patients against controls and present it as a finding.** With this few
+  patients, a proper test split holds fewer than 8 of them, and the curators "strongly advise
+  against any such approach because it would mislead patients". For that reason the group
+  statistics are this project's primary result, and the classification is exploratory.
+- **Cite the papers below.** The dataset README also notes that the UPDRS ratings were collected
+  by trained laboratory staff rather than a board-certified neurologist. This project does not use
+  them.
+
+### Citations requested by the dataset
+
+Reproduced as `data/raw/ds002778/README` gives them:
+
+1. Nicko Jackson, Scott R. Cole, Bradley Voytek, Nicole C. Swann. Characteristics of Waveform Shape
+   in Parkinson's Disease Detected with Scalp Electroencephalography. eNeuro 20 May 2019, 6 (3)
+   ENEURO.0151-19.2019; DOI: 10.1523/ENEURO.0151-19.2019.
+2. Swann NC, de Hemptinne C, Aron AR, Ostrem JL, Knight RT, Starr PA. Elevated synchrony in
+   Parkinson disease detected with electroencephalography. Ann Neurol. 2015 Nov;78(5):742-50. doi:
+   10.1002/ana.24507. Epub 2015 Sep 2. PMID: 26290353; PMCID: PMC4623949.
+3. George JS, Strunk J, Mak-McCully R, Houser M, Poizner H, Aron AR. Dopaminergic therapy in
+   Parkinson's disease decreases cortical beta band coherence in the resting state and increases
+   cortical beta band power during executive control. Neuroimage Clin. 2013 Aug 8;3:261-70. doi:
+   10.1016/j.nicl.2013.07.013. PMID: 24273711; PMCID: PMC3814961.
+4. Appelhoff, S., Sanderson, M., Brooks, T., Vliet, M., Quentin, R., Holdgraf, C., Chaumon, M.,
+   Mikulan, E., Tavabi, K., Höchenberger, R., Welke, D., Brunner, C., Rockhill, A., Larson, E.,
+   Gramfort, A. and Jas, M. (2019). MNE-BIDS: Organizing electrophysiological data into the BIDS
+   format and facilitating their analysis. Journal of Open Source Software 4: (1896).
+5. Pernet, C. R., Appelhoff, S., Gorgolewski, K. J., Flandin, G., Phillips, C., Delorme, A.,
+   Oostenveld, R. (2019). EEG-BIDS, an extension to the brain imaging data structure for
+   electroencephalography. Scientific Data, 6, 103. https://doi.org/10.1038/s41597-019-0104-8.
+
+The dataset itself, as `dataset_description.json` describes it: Rockhill, A. P., Jackson, N.,
+George, J., Aron, A. and Swann, N. C. *UC San Diego Resting State EEG Data from Patients with
+Parkinson's Disease*. OpenNeuro. doi:10.18112/openneuro.ds002778.v1.0.5.
+
+## Pipeline
+
+```mermaid
+flowchart TD
+    raw["OpenNeuro ds002778 v1.0.5<br/>BIDS, 32 EEG channels"] --> rec["pdeeg recordings<br/>one row per recording"]
+    rec --> pre["pdeeg preprocess<br/>crop, band-pass, average reference,<br/>ICA + ICLabel, mark bad stretches"]
+    pre --> clean[("cleaned continuous recordings")]
+    clean --> scal["pdeeg mfdfa-scaling<br/>8 random recordings, no labels read"]
+    scal -.->|"fit ranges, written into<br/>configs/features/mfdfa.yaml"| mf
+    clean --> psd["band power (Welch)<br/>baseline"]
+    clean --> mf["MFDFA: broadband EEG and<br/>theta, alpha, beta envelopes,<br/>with IAAFT and shuffled surrogates"]
+    psd --> feat[("feature tables (Parquet)<br/>per channel and per region")]
+    mf --> feat
+    feat --> stats["pdeeg stats: PRIMARY<br/>cluster permutation tests, FDR,<br/>pre-registered in configs/stats.yaml"]
+    feat --> cls["pdeeg classify: EXPLORATORY<br/>nested CV split by participant,<br/>permutation p-values, bootstrap CIs"]
+    pre --> rep["reports/"]
+    scal --> rep
+    stats --> rep
+    cls --> rep
+```
+
+- **Preprocessing** keeps each recording continuous, because MFDFA needs unbroken data. Each
+  recording is cropped to 180 s from trigger `1` (or the file start where it is missing),
+  band-passed 0.5 to 50 Hz and re-referenced to the average. Extended infomax ICA is fitted on a
+  1 to 100 Hz copy, and ICLabel removes components it calls eye blink, muscle, heart or line noise
+  with probability at least 0.8. Remaining bad stretches are marked, not cut out.
+- **MFDFA** uses q from -5 to 5 in steps of 0.5, detrending order 1 and 12 log-spaced scales per
+  fit range. The fit ranges are 0.045 to 0.09 s and 0.3 to 1 s for the broadband EEG, and 2 to
+  17.8 s for the envelopes. They were read from a [scaling inspection](reports/mfdfa_scaling.md)
+  of 8 recordings chosen at random, with no subject, session or group label loaded. The spectrum
+  width of every channel is compared with 20 IAAFT and 20 shuffled surrogates.
+- **Statistics** were fixed in [`configs/stats.yaml`](configs/stats.yaml) before any feature was
+  compared between groups. The three primary features are the beta-envelope `h2` and
+  `delta_alpha` and the broadband `delta_alpha` on the 0.3 to 1 s range. They are tested PD OFF
+  against HC (also adjusted for age and sex) and OFF against ON within patients, with cluster-based
+  permutation tests over channels (10000 permutations, cluster-forming p 0.05) and
+  Benjamini-Hochberg across the family.
+- **Classification** was fixed in [`configs/model.yaml`](configs/model.yaml) before any classifier
+  was run. It uses nested cross-validation with every split grouped by participant (see
+  [How evaluation works now](#how-evaluation-works-now)).
+
+The full methods, including how every parameter was chosen, are in
+[`reports/methods.md`](reports/methods.md).
+
+## Quick start
 
 Requires Python 3.11 or 3.12.
 
-```
+```bash
 python -m venv .venv
-.venv\Scripts\activate          # Windows; on Linux/macOS: source .venv/bin/activate
-pip install -e .[dev]           # .[dev,app] for the research demo as well
-ruff check .
-pytest                          # synthetic data only; the one dataset test skips without it
+source .venv/bin/activate       # Windows: .venv\Scripts\activate
+pip install -e .[dev]
+pytest -m "not dataset"         # synthetic data only, nothing is downloaded
+
+pdeeg all                       # download -> preprocess -> features -> stats -> classify -> reports
 ```
 
-## Running the pipeline
+`pdeeg all` skips every step whose settings, inputs and outputs are unchanged, so it is safe to
+re-run. Preprocessing and the MFDFA surrogates take hours. Each step is also its own command:
 
-```
-pdeeg all                       # download, recordings, preprocess, features, stats, classify
-pdeeg all --force               # run every step again (preprocessing and MFDFA take hours)
-```
-
-Each step is also a command: `pdeeg download`, `recordings`, `preprocess`, `features` (band
-power, MFDFA and the h(q) curves; also `psd-features`, `mfdfa-features`, `mfdfa-curves` alone),
-`stats`, `classify`, and `report`, which writes every report again from what the steps stored.
-Each takes `--force`, and those that run in parallel take `--n-jobs N`.
-
-A step is skipped while it is current. `download`, `recordings`, the band powers, the curves,
-`stats` and `classify` record a stamp in `data/interim/stages/` with a digest of their settings
-and the SHA-256 of every input and output file; they run again when a setting, an input or an
-output differs. Preprocessing and the MFDFA runs keep their per-recording caches (settings and
-file times). Every report is rewritten each time from the stored results and holds no date or
-time. The seeds are fixed in the configuration, and every random stream is derived from the seed
-and the name of what it is for, not from the order or the number of processes.
-
-| Also | |
+| Command | Does |
 |---|---|
-| `make all`, `make stats FORCE=1`, `make features N_JOBS=8`, ... | Makefile targets for every command, plus `install`, `test`, `lint`, `format`, `docker-build`, `docker-run`, `app`. Plain `make` lists them. |
-| `docker build -t pdeeg .` then `docker run --rm -v "$PWD/data:/app/data" pdeeg` | `pdeeg all` in a container (Python 3.12 slim, non-root user). Everything goes to the mounted `data/`: reports to `data/reports/`, MLflow to `data/mlruns/` and `data/mlflow.db`. Any other command can follow the image name. |
-| `.github/workflows/ci.yml` | On every push: ruff and pytest on Python 3.11 with synthetic data only (`-m "not dataset"`; nothing is downloaded), and a build of the Docker image. |
+| `pdeeg download`, `pdeeg recordings` | Fetch and verify the dataset; index its recordings |
+| `pdeeg preprocess` | Clean every recording; writes `reports/qc_preprocessing.md` |
+| `pdeeg mfdfa-scaling` | Label-blind scaling inspection; writes `reports/mfdfa_scaling.md` |
+| `pdeeg features` | Band power, MFDFA with surrogates, and h(q) / f(alpha) curves |
+| `pdeeg stats` | Group statistics; writes `reports/stats_results.md` |
+| `pdeeg classify` | Classification; writes `reports/classification_results.md`, tracked in MLflow |
+| `pdeeg report` | Rewrite every report from stored results without recomputing |
+| `pdeeg config` | Print the resolved configuration |
 
-## Data
+Every step except `report` takes `--force`, and the parallel ones take `--n-jobs N`. The same commands are available as
+`make` targets, and `docker build -t pdeeg .` builds an image that runs `pdeeg all` on a mounted
+`data/` directory. A Streamlit page (`pip install -e .[app]`, then
+`streamlit run app/streamlit_app.py`) shows the MFDFA of a single uploaded recording. It has no
+classifier and makes no prediction.
 
-The data is [OpenNeuro ds002778](https://openneuro.org/datasets/ds002778/versions/1.0.5), version
-1.0.5: 16 controls with one session each and 15 patients with an off- and an on-medication session,
-recorded at UC San Diego on a 32-channel BioSemi system at 512 Hz. It is not tracked in git.
-
-```
-pdeeg download                      # fetch into data/raw/ds002778; re-running only verifies
-pdeeg recordings                    # write data/interim/recordings.parquet, one row per recording
-```
-
-In code, `pdeeg.data.bids.list_recordings` builds that table and `load_raw` reads one of its rows
-as 32 scalp EEG channels with the montage applied.
-
-Things in the dataset that later stages have to allow for:
-
-- **Two on-medication sessions are not raw recordings.** `sub-pd6` and `sub-pd16` `ses-on` were
-  exported from already preprocessed EEGLAB data (see `notes` in `participants.tsv`): they are
-  high-pass filtered and have no mains peak, unlike every other recording, including the same
-  patients' off-medication sessions.
-- **Mains frequency is 60 Hz.** Nine sidecars say 50, which the signals do not support, so use
-  `dataset.line_freq` from `configs/data.yaml` rather than `raw.info["line_freq"]`.
-- **`EXG1`-`EXG8` are typed EEG** in every `channels.tsv` and are undocumented. `load_raw` drops
-  them because the montage has no position for them.
-- **An undocumented trigger with value 1** is in 44 of the 46 recordings: 2-29 s in, except 96 s
-  in for `sub-pd6` `ses-on`. At least 181 s of data follow it. `sub-hc4` and `sub-pd16` `ses-on`
-  do not have it.
-
-Read `data/raw/ds002778/README` before publishing anything from this data. The curators ask to be
-contacted before a manuscript is submitted, and they caution specifically against presenting
-machine-learning classification of patients against controls as a diagnostic result, because 15
-patients are too few for reliable test statistics.
-
-## Preprocessing
-
-```
-pdeeg preprocess --config configs/preprocessing.yaml    # also takes --n-jobs N and --force
-```
-
-Each recording becomes one continuous, cleaned file; nothing is cut into epochs or cut out,
-because MFDFA needs continuous data. The steps, all set in `configs/preprocessing.yaml`:
-
-1. Crop to 180 s, starting at trigger 1 where the recording has it.
-2. Band-pass 0.5-50 Hz (zero-phase FIR) and re-reference to the average.
-3. Fit ICA on a 1-100 Hz copy with as many components as the data rank, classify the components
-   with ICLabel, and remove those it calls eye, muscle, heart or line noise with a probability of
-   at least 0.8.
-4. Mark the remaining bad stretches as `BAD_peak` and `BAD_flat` annotations.
-
-Outputs:
-
-- `data/interim/clean/sub-XX_ses-YY_clean.fif`: the cleaned recording. Read it with
-  `pdeeg.preprocessing.pipeline.read_clean`.
-- `data/interim/clean/sub-XX_ses-YY_clean.json`: its log, with the crop window, mains frequency,
-  removed components and their ICLabel probabilities, bad stretches and per-channel statistics.
-- `reports/qc_preprocessing.md` and `reports/figures/qc_preprocessing/`: the QC report, with a
-  spectrum and the removed components for every recording and a list of flagged recordings.
-
-A recording is skipped when its outputs are newer than its input files and were written with the
-same settings, so re-running after a change only redoes what the change affects. The seed is
-fixed in the configuration; re-running two recordings in a single process reproduced the
-six-worker run byte for byte.
-
-## MFDFA
-
-`pdeeg.features.mfdfa` implements multifractal detrended fluctuation analysis as in Kantelhardt et
-al., Physica A 316 (2002) 87-114. It takes any one-dimensional series:
-
-```python
-from pdeeg.features.mfdfa import make_qs, make_scales, mfdfa, spectrum_features
-
-qs = make_qs(-5.0, 5.0, 0.5)  # moment orders
-scales = make_scales(len(x), 16, 0.1, 20)  # 20 log-spaced window sizes, 16 samples to N / 10
-result = mfdfa(x, scales, qs, order=1)  # Fq, h, h_r2, tau, alpha, f_alpha
-features = spectrum_features(result, qs)  # h2, delta_h, delta_alpha, alpha0, asymmetry, min_r2
-```
-
-`pdeeg.features.surrogates` makes shuffled and IAAFT surrogates of a series, and
-`pdeeg.features.synthetic` the test signals with known exponents: fractional Gaussian noise and
-the binomial multiplicative cascade.
-
-`tests/test_mfdfa.py` and `notebooks/01_mfdfa_validation.ipynb` check the code against those
-signals and against the PyPI `MFDFA` package, which returns the same fluctuation functions to 11
-digits. With the values in `configs/features/mfdfa.yaml` and 65536 samples:
-
-- `h(2)` of a monofractal signal has a bias of 0.003 or less and a standard deviation of 0.01 to
-  0.02.
-- A monofractal signal still shows a spectrum width `delta_alpha` of 0.03 to 0.06 (0.12 for a
-  random walk), because the estimator widens the spectrum at finite length. Judge a width against
-  surrogates, not against zero.
-- For the binomial cascade the width is within 4 % of the exact 1.57. `h(q)` is up to 0.065 too
-  low, because the cascade reaches its scaling only at large scales and log-spaced windows
-  straddle its dyadic boxes; fitted from 256 samples on dyadic scales it is 0.011 low at every q.
-- Detrending of order m removes a polynomial trend of degree m from the profile, which is degree
-  m - 1 in the series itself.
-
-To re-run the notebook: `jupyter execute --inplace notebooks/01_mfdfa_validation.ipynb`.
-
-### Where the EEG scales
-
-MFDFA is run on two kinds of series per channel: the cleaned EEG itself ("broadband"), and the
-Hilbert amplitude envelope of the EEG band-passed to theta, alpha or beta
-(`pdeeg.features.envelope`). Before any exponent is fitted,
-
-```
-pdeeg mfdfa-scaling                 # also takes --n-jobs N
-```
-
-plots `log Fq(s)` against `log s` and its local slope for 8 recordings picked at random, next to
-noise put through the same filters, and writes `reports/mfdfa_scaling.md`. The recordings appear
-as R1 to R8: the command does not load the group labels, so the fit ranges read from the report
-cannot be tuned towards a group difference. The ranges and the reasons for them are in
-`configs/features/mfdfa.yaml`. In short:
-
-- **Broadband** has no single scaling regime. The 50 Hz low-pass bends it below about 0.05 s, the
-  alpha rhythm between 0.09 and 0.4 s, and the 0.5 Hz high-pass above about 1 s. Two short ranges
-  are left, 0.045-0.09 s and 0.3-1 s. On the first, filtered monofractal noise is as "multifractal"
-  as the EEG, so only `h2` means anything there.
-- **Envelopes** are fitted from 2 s to a tenth of the series (17.8 s). Below 2 s the band-pass
-  filter alone gives the envelope of white noise a memory.
-
-## Features
-
-```
-pdeeg features                      # the three below; also takes --n-jobs N and --force
-pdeeg psd-features                  # band power
-pdeeg mfdfa-features                # MFDFA with surrogates, and the QC report
-pdeeg mfdfa-curves                  # h(q) and f(alpha), for the figures
-```
-
-`pdeeg mfdfa-features` runs MFDFA on every channel of every recording, for each series (the
-broadband EEG and the theta, alpha and beta envelopes) and each fit range, and writes
-
-- `data/processed/mfdfa_features_ds002778-1.0.5.parquet`: the long table, one value per row, with
-  the columns `subject`, `session`, `group`, `level` (`channel` or `region`), `name` (the channel
-  or region), `variant` (`broadband` or `envelope`), `band`, `fit_range`, `segments`, `feature` and
-  `value`;
-- `data/processed/mfdfa_features_ds002778-1.0.5_wide.parquet`: one row per recording and
-  `segments`, one column per feature, named `<series>_<fit range>_<feature>_<channel or region>`,
-  for modelling. It holds the features listed under `wide_features` in the configuration: all
-  five for the long broadband range and the envelopes, `h2` alone for the short broadband range;
-- `reports/qc_mfdfa.md`: the QC report.
-
-What the long table holds for each channel, series and fit range:
-
-| `feature` | What it is |
-|---|---|
-| `h2`, `delta_h`, `delta_alpha`, `alpha0`, `asymmetry` | The MFDFA features (`pdeeg.features.mfdfa.spectrum_features`) |
-| `min_r2` | Worst R² of the h(q) fits: a quality measure, not a feature |
-| `n_scales` | Scales the fit used: 12, or fewer when bad stretches left too few windows |
-| `delta_alpha_iaaft_mean`, `_sd` | Mean and standard deviation of `delta_alpha` over 20 IAAFT surrogates |
-| `delta_alpha_iaaft_z` | (`delta_alpha` - that mean) / that standard deviation |
-| `delta_alpha_iaaft_p` | Share of the surrogates, the original counted in, at least as wide as the original; 1/21 when it is wider than all 20 |
-| `h2_iaaft_mean` | Mean `h2` of the surrogates, which should equal `h2`: a check on the surrogates |
-| `..._shuffle_...` | The same five for 20 shuffled surrogates |
-
-Three things about these tables:
-
-- **`segments`.** Every feature is computed on the whole recording (`full`) and again without
-  the windows that touch a stretch annotated bad (`clean`). Windows are dropped where they stand;
-  data is never cut out and joined. Surrogates are made from the whole series, so their rows are
-  `full` only. For the 22 recordings without a bad stretch the two are equal.
-- **Regions.** A region's value is the mean of its channels' values. The five regions (frontal,
-  central, temporal, parietal, occipital) are defined in `configs/data.yaml`.
-- **Runtime.** The surrogates take most of the time: 117,760 IAAFT surrogates of 92,160 samples,
-  about 5 minutes per recording on 16 processes. Every MFDFA run is stored per recording in
-  `data/interim/mfdfa/`, a recording is skipped when its stored runs are current, and the tables
-  are rebuilt from the stored runs in seconds.
-
-`pdeeg psd-features` writes the baseline, `data/processed/psd_features_ds002778-1.0.5.parquet`
-(long, with `band` in place of the MFDFA columns) and its `_wide` companion: log10 relative band
-power from the Welch spectrum, delta to gamma, per channel and region, again `full` and `clean`.
-Run it before `pdeeg mfdfa-features` to have the band powers included in the QC report.
-
-## Statistics
-
-```
-pdeeg stats                         # also takes --n-jobs N and --force
-```
-
-With 15 patients and 16 controls, the group statistics are the primary result. Everything they
-do is set in `configs/stats.yaml`, which was written, and is to be kept, as a pre-registration:
-the three primary features (`h2` and `delta_alpha` of the beta envelope, broadband `delta_alpha`
-on the long range) were fixed before any group was compared, and every other feature of the
-MFDFA and band-power wide tables is exploratory. The report prints the file's SHA-256, so a
-later change to it is visible.
-
-Every feature goes through four analyses, one value per channel:
-
-| Analysis | What | Test |
-|---|---|---|
-| `pd_vs_hc` | Patients off medication (one session per patient, configurable) against controls | Two-sample cluster-based permutation test |
-| `pd_vs_hc_adjusted` | The same on residuals after regressing out age and sex | Same |
-| `off_vs_on` | OFF - ON within patients, without `sub-pd6` and `sub-pd16`, whose ON sessions were exported already preprocessed | One-sample cluster test on the differences (sign flips; exact for 13 pairs) |
-| `off_vs_on_all_pairs` | The same with all 15 patients | Same |
-
-The cluster tests are MNE's, with channel neighbours from the FieldTrip `biosemi32` template:
-Student's t per channel, clusters of neighbouring channels above the two-sided p = 0.05 t
-threshold, 10,000 relabellings, and a separate seeded random stream per test. Effect sizes are
-Hedges' g per channel (g_z for the paired differences). Benjamini-Hochberg runs over the cluster
-p-values of the primary family in both contrasts, and separately over the exploratory family;
-age (Welch) and sex (Fisher) are compared between the groups.
-
-Outputs: `reports/stats_results.md` with its figures in `reports/figures/stats/`, and the tables
-`data/processed/stats_{tests,clusters,channels,demographics}_ds002778-1.0.5.parquet`.
-`pdeeg mfdfa-curves` writes `data/processed/mfdfa_curves_ds002778-1.0.5.parquet`: h(q), alpha
-and f(alpha) of every channel, series and fit range, which the feature tables do not keep.
-
-## Classification
-
-```
-pdeeg classify                      # also takes --n-jobs N and --force
-```
-
-Secondary and exploratory: with about 30 people, the statistics above are the primary result.
-Settings are in `configs/model.yaml`, written before any classifier was run on the data.
-
-- **Tasks.** (A) PD OFF against controls, one recording per participant. (B) PD OFF against ON
-  within patients, without `sub-pd6` and `sub-pd16`: each patient's features are centred on the
-  mean of their own two recordings, so the question is which of the two is OFF (chance 50 %).
-- **Features.** Band power, MFDFA, both, and age + sex alone as a confound baseline (task A
-  only: age and sex do not change between sessions). Region averages by default; at channel
-  level, `SelectKBest` runs inside every training fold.
-- **Models.** Logistic regression (saga; L2, L1 or elastic net), linear SVM, and gradient
-  boosting with 100 stumps or depth-2 trees.
-- **Evaluation.** Every split is by participant. Outer loop: stratified 5-fold grouped by
-  participant; leave-one-subject-out was timed and would have needed weeks of CPU with the
-  permutations (the numbers are in `configs/model.yaml`). Inner loop: grouped 3-fold
-  `GridSearchCV` around a Pipeline of scaling, (selection) and the model, scored by balanced
-  accuracy. Balanced accuracy, ROC AUC, sensitivity and specificity on the out-of-fold
-  predictions, with 95 % bootstrap intervals over participants, permutation p-values from 1000
-  relabellings that each repeat the whole nested procedure (within patients for task B), and the
-  spread over 10 other outer splits.
-- **Leakage.** Every outer and inner split is checked at run time, and `tests/test_leakage.py`
-  checks every splitter of every task.
-- **Tracking.** One MLflow run per task, feature set and model in `mlflow.db` (artifacts in
-  `mlruns/`), tagged with the configuration digest, dataset version, feature-table digests and
-  git commit. To browse: `mlflow ui --backend-store-uri sqlite:///mlflow.db`.
-
-Outputs: `reports/classification_results.md`, `reports/figures/classification/`, and
-`data/processed/classification_summary_ds002778-1.0.5.parquet`. Each evaluation's predictions,
-permutation null, weights and summary are stored in `data/processed/classification/`, from which
-`pdeeg report` writes the report again without running anything.
-
-## Research demo
-
-```
-pip install -e .[app]
-streamlit run app/streamlit_app.py  # or: make app
-```
-
-**Research demo — not a diagnostic tool.** A page that takes one BDF or EDF file with the 32
-`biosemi32` channels, cleans it with the settings of `configs/preprocessing.yaml`, and shows its
-fluctuation functions, the singularity spectrum f(alpha) of a channel, and topographies of the
-MFDFA features. It describes one recording; it has no classifier and shows no prediction
-(`tests/test_demo.py` checks that it imports none). The analysis is in `pdeeg.demo`.
-
-## Configuration
-
-Every setting, including every path, lives in `configs/`. Nothing is hard-coded in the package.
+Every setting lives in `configs/`, and nothing is hard-coded in the package:
 
 | File | Covers |
 |---|---|
-| `configs/data.yaml` | Dataset identity and montage, data and report paths, what each session label means, scalp regions |
-| `configs/preprocessing.yaml` | Cropping, filtering, referencing, ICA, bad-stretch marking, QC limits |
-| `configs/features/mfdfa.yaml` | MFDFA moment orders, detrending, envelope bands, fit ranges and why, bad stretches, surrogates, outputs, the scaling inspection |
-| `configs/features/psd.yaml` | Spectral estimation and frequency bands |
-| `configs/stats.yaml` | Pre-registered primary features, who is compared, cluster tests, FDR, covariates, figures |
-| `configs/model.yaml` | Classification tasks, feature sets, model grids, nested cross-validation, permutations, experiment tracking |
+| [`configs/data.yaml`](configs/data.yaml) | Dataset, paths, session labels, scalp regions |
+| [`configs/preprocessing.yaml`](configs/preprocessing.yaml) | Crop, filter, reference, ICA, bad-stretch marking, QC limits |
+| [`configs/features/mfdfa.yaml`](configs/features/mfdfa.yaml) | Moment orders, detrending, fit ranges and the reasons for them, surrogates |
+| [`configs/features/psd.yaml`](configs/features/psd.yaml) | Welch spectrum and band limits |
+| [`configs/stats.yaml`](configs/stats.yaml) | Pre-registered primary features, contrasts, cluster tests, FDR, covariates |
+| [`configs/model.yaml`](configs/model.yaml) | Tasks, feature sets, model grids, nested CV, permutations, tracking |
 
-The config directory is taken from `--config-dir`, then the `PDEEG_CONFIG_DIR` environment
-variable, then `./configs`. Relative paths in the YAML files are resolved against the parent of the
-config directory. Every key is required and unknown keys are rejected. To see the resolved result:
+## Results
 
-```
-pdeeg config
-```
+### Data quality
+
+All 46 recordings were cleaned. Of these, 9 are flagged for a closer look in
+[`reports/qc_preprocessing.md`](reports/qc_preprocessing.md). A flag is a reason to look, not an
+exclusion. Two findings shaped the analysis:
+
+- **Two on-medication sessions were already filtered.** In `sub-pd6` and `sub-pd16` `ses-on`,
+  power below 0.5 Hz before filtering is -29 and -27 dB relative to 1-4 Hz (robust z -16.9 and
+  -16.3). The QC found this from the signals alone; `participants.tsv` confirms that both sessions
+  were exported from preprocessed EEGLAB data. Both are left out of the main OFF against ON
+  analyses.
+- **Mains is 60 Hz.** A 60 Hz peak is present in 37 recordings and no mains peak in 9, but 9 of
+  the sidecar files say 50 Hz. The pipeline takes 60 Hz from the configuration.
+
+![Preprocessing QC: time marked bad, longest clean stretch and ICA components removed, per recording](reports/figures/qc_preprocessing/overview.png)
+
+### Where the EEG scales
+
+Before any exponent was fitted, the fluctuation functions of 8 recordings, picked at random and
+shown only as R1 to R8, were compared with noise put through the same filters
+([`reports/mfdfa_scaling.md`](reports/mfdfa_scaling.md)). This sets the fit ranges. It is not a
+comparison between groups. Over each chosen range, as median [10th, 90th percentile] over 256
+channel fits (EEG) or 40 noise realisations:
+
+| Series | Fit range | Source | h(2) | delta_alpha |
+|---|---|---|---|---|
+| Broadband | 0.045 to 0.09 s | EEG | 1.13 [0.96, 1.34] | 1.07 [0.57, 1.85] |
+| | | filtered 1/f noise | 1.04 [1.02, 1.05] | 1.08 [0.77, 1.71] |
+| Broadband | 0.3 to 1 s | EEG | 0.99 [0.13, 1.18] | 0.32 [0.11, 0.66] |
+| | | filtered 1/f noise | 0.97 [0.94, 1.00] | 0.12 [0.07, 0.28] |
+| Theta envelope | 2 to 17.8 s | EEG | 0.70 [0.56, 0.85] | 0.35 [0.15, 0.63] |
+| | | white-noise envelope | 0.54 [0.48, 0.61] | 0.19 [0.08, 0.35] |
+| Alpha envelope | 2 to 17.8 s | EEG | 0.74 [0.60, 0.88] | 0.35 [0.18, 0.67] |
+| | | white-noise envelope | 0.53 [0.47, 0.59] | 0.17 [0.07, 0.26] |
+| Beta envelope | 2 to 17.8 s | EEG | 0.69 [0.59, 0.87] | 0.23 [0.09, 0.55] |
+| | | white-noise envelope | 0.52 [0.46, 0.58] | 0.13 [0.05, 0.27] |
+
+- The broadband EEG has no single scaling regime. The band-pass and the alpha rhythm leave two
+  short ranges. On the shorter one, filtered monofractal noise is as wide as the EEG (1.07 against
+  1.08), so the width there belongs to the filter, and only `h2` from that range is used.
+- On the 0.3 to 1 s range and in every band envelope, the median EEG spectrum is wider than that
+  of the matched noise. The envelopes also have a higher `h2` (0.70, 0.74 and 0.69 against 0.54, 0.53 and 0.52), so the band
+  amplitudes are correlated over seconds beyond what the filter alone produces.
+
+![Local slope of log Fq(s) against log s for the broadband EEG and the three band envelopes, with matched filtered noise and the chosen fit ranges shaded](reports/figures/mfdfa_scaling/local_slopes.png)
+
+### Group differences (primary)
+
+**Not run yet.** `pdeeg stats` will write `reports/stats_results.md`. The tests and features are
+already fixed in `configs/stats.yaml`: the three primary features listed under
+[Pipeline](#pipeline), PD OFF against HC with and without age and sex adjustment, and OFF against
+ON within patients, with `sub-pd6` and `sub-pd16` left out of the main paired analysis and kept in
+a sensitivity analysis.
+
+### Classification (exploratory)
+
+**Not run yet.** `pdeeg classify` will write `reports/classification_results.md`, with balanced
+accuracy, ROC AUC, sensitivity and specificity, their 95 % bootstrap intervals and permutation
+p-values. These will be reported for band power, MFDFA, both, and age and sex alone.
+
+## What changed from the original project
+
+### The original evaluation leaked
+
+The original notebooks cut each recording into one-second epochs and pooled them.
+`main3.ipynb` stacks every subject's epochs into one array, with one label per epoch.
+`svm.ipynb`, `cnn3.ipynb` and `1d_cnn3.ipynb` then split that array with `train_test_split`,
+`KFold` or `StratifiedKFold`, without groups. Every test fold therefore held epochs from people
+whose other epochs were in the training data. Because a person's label never changes, the models
+could score well by recognising the person rather than the disease. Accuracies measured this way
+say nothing about a new person, and they cannot be compared with anything reported here.
+`cnn3.ipynb` also fits its `StandardScaler` on all the data before splitting.
+
+The notebooks in `subject_independent/` do split by subject, but `subject_independent/cnn3.ipynb`
+still fits its scaler on all subjects before the split. It also passes the test set as
+`validation_data`, so any choice made while watching training was made on test data. No notebook
+reports an interval or a permutation test.
+
+### How evaluation works now
+
+- **The participant is the unit.** PD against HC uses one recording per participant. OFF against
+  ON centres each patient's features on the mean of their own two recordings, so the question is
+  which of a patient's two recordings is OFF.
+- **Nested cross-validation.** The outer loop is stratified 5-fold, grouped by participant. The
+  inner loop is a grouped, stratified 3-fold grid search over one `Pipeline` of scaling,
+  (channel-level) feature selection and model, so every fitted step sees training folds only.
+- **Guarded.** A wrapped splitter raises `LeakageError` if any outer or inner split puts one
+  participant on both sides, and [`tests/test_leakage.py`](tests/test_leakage.py) checks every
+  splitter of every task.
+- **Uncertainty is reported.** Balanced accuracy, ROC AUC, sensitivity and specificity come with
+  95 % bootstrap intervals over participants (2000 resamples). The permutation p-values come from
+  1000 permutations that each repeat the whole nested procedure, with labels permuted within
+  patients for OFF against ON. The spread over 10 other outer splits shows how much the split
+  alone moves the score.
+- **A confound baseline.** Age and sex alone are classified as a feature set of their own.
+
+### Everything else
+
+| | Original notebooks | Here | Why |
+|---|---|---|---|
+| Primary question | Classify patients against controls | Pre-registered group statistics; classification exploratory | The dataset's curators advise against classification on 15 patients |
+| Reference | None set | Average reference | BioSemi recordings are reference-free and need an offline reference |
+| Artefact removal | ICA; eye components by correlation with Fp2/F8; T7 used as a stand-in ECG channel | Extended infomax on a 1 to 100 Hz copy; ICLabel classifies the components | T7 is a scalp channel, not an ECG |
+| Features | Multitaper band power per epoch; alpha 8-12 Hz and beta 13-30 Hz, so 12-13 Hz was in no band | MFDFA of broadband EEG and band envelopes, tested against surrogates; contiguous Welch band power as the baseline | Contiguous bands; MFDFA is the question this project asks |
+| Parameters | Set in the notebooks | In YAML, with the reason next to each; MFDFA fit ranges chosen without labels | No parameter can be tuned towards a group difference |
+| Code and data | Functions copied between notebooks; one pickle per band per manual run | One package with a CLI, Parquet tables, cached steps, tests, CI and Docker | Reproducible from one command |
+| Second dataset | Iowa recordings | Dropped | Never in the repository, so nothing here can be checked against it |
+
+## Limitations
+
+- **Small sample.** 15 patients and 16 controls from one site. Only large group differences are
+  detectable, and every classification estimate has a wide interval. These analyses describe this
+  sample. They are not a test that would carry over to new patients.
+- **No external validation.** There is one dataset and no held-out cohort. Nothing here supports
+  clinical or diagnostic use.
+- **Short recordings and short scaling ranges.** Each recording gives 180 s. The broadband EEG
+  scales only over two short ranges, and on the shorter one the spectrum width is the filter's.
+  MFDFA widths are biased upward at finite length, so they are judged against surrogates rather
+  than against zero.
+- **Filter-induced memory.** Band-passing gives even white noise an envelope `h2` above 0.5 (0.54,
+  0.53 and 0.52 for theta, alpha and beta on the fit range). The bias is the same for every
+  recording, so it shifts all groups alike, but the absolute envelope exponents should not be read
+  as the brain's alone.
+- **Two on-medication sessions were processed differently.** `sub-pd6` and `sub-pd16` `ses-on`
+  came pre-filtered. They are excluded from the main OFF against ON analyses, which reduces those
+  analyses to 13 pairs.
+- **Confounds.** Age and sex are adjusted for in a sensitivity analysis and tested as a classifier
+  baseline. Cognition, disease duration and medication dose are not modelled.
+- **Judgement in the fit ranges.** The ranges were read by eye from 8 recordings. No label was
+  seen, but it remains a choice that other analysts could make differently.
+- **No leave-one-subject-out.** With a full nested permutation test it would have taken weeks of
+  CPU (the timing is in `configs/model.yaml`). A 5-fold estimate depends on the split, which is
+  why 10 other splits are reported.
+- **Flagged recordings are kept.** The 9 recordings flagged by QC are in the analysis, apart from
+  the two sessions above in the paired tests.
+
+## Documentation
+
+- [`reports/methods.md`](reports/methods.md): preprocessing, MFDFA, surrogates, statistics and the
+  classification protocol in full.
+- [`MODEL_CARD.md`](MODEL_CARD.md): intended use, evaluation, metrics and ethical considerations.
+- [`reports/qc_preprocessing.md`](reports/qc_preprocessing.md) and
+  [`reports/mfdfa_scaling.md`](reports/mfdfa_scaling.md): the reports so far.
+- [`notebooks/01_mfdfa_validation.ipynb`](notebooks/01_mfdfa_validation.ipynb): the MFDFA code
+  checked on synthetic signals with known exponents and against the PyPI `MFDFA` package.
 
 ## Layout
 
 ```
-configs/        YAML configuration
-src/pdeeg/      the package: config.py, cli.py, pipeline.py (the steps), stages.py (their
-                stamps), demo.py, and data/, preprocessing/, features/, models/, stats/, viz/
-app/            the Streamlit research demo
-docker/         the container's entrypoint (Dockerfile and Makefile are at the top)
-scripts/        one-off scripts
-tests/          pytest tests
-notebooks/      exploratory notebooks that import pdeeg
-reports/        generated figures and tables
-data/           raw/, interim/, processed/ (contents git-ignored)
+configs/        YAML configuration: every setting and path
+src/pdeeg/      the package: data/, preprocessing/, features/, stats/, models/, viz/, cli.py
+app/            Streamlit research demo (no classifier)
+tests/          pytest; synthetic data only, except one test marked "dataset"
+notebooks/      MFDFA validation
+reports/        generated reports and figures
+data/           raw/, interim/, processed/ (contents not tracked)
 ```
