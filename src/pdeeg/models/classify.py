@@ -40,11 +40,12 @@ def run_classification(
     *,
     n_jobs: int | None = None,
     progress: Callable[[Evaluation], None] | None = None,
+    plan: list[tuple[str, str, str]] | None = None,
 ) -> list[Evaluation]:
-    """Evaluate everything :func:`planned` lists, in that order."""
+    """Evaluate everything ``plan`` (by default :func:`planned`) lists, in that order."""
     jobs = config.model.n_jobs if n_jobs is None else n_jobs
     results, data = [], {}
-    for task, feature_set, name in planned(config):
+    for task, feature_set, name in planned(config) if plan is None else plan:
         if (task, feature_set) not in data:
             data[task, feature_set] = task_data(config, recordings, tables, task, feature_set)
         result = evaluate(data[task, feature_set], task, feature_set, name, config, n_jobs=jobs)

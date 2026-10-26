@@ -4,7 +4,8 @@ A :class:`Stage` names a step, its settings, its input files and its output file
 records a stamp in ``<interim>/stages/<name>.json``: a digest of the settings, the SHA-256 of
 every input and of every output. ``is_current()`` is true while the settings and every input
 are as recorded and every output is still there, unchanged. Files are compared by content, so
-rewriting a file with the same bytes keeps the steps after it current.
+rewriting a file with the same bytes keeps the steps after it current. A step done in parts
+(classification, one part per task) has a stamp per part, ``<name>-<part>.json``.
 
 Paths in the settings are recorded relative to the project root, so a copy of the project in
 another place (a container, a fresh clone) finds its stamps current.
@@ -31,6 +32,7 @@ STEP_VERSIONS = {
     "curves": 1,
     "stats": 1,
     "classify": 1,
+    "cascade": 1,
 }
 
 _CHUNK = 1 << 20
@@ -100,17 +102,19 @@ class Stage:
         settings: Any,
         inputs: Iterable[Path],
         outputs: Iterable[Path],
+        part: str | None = None,
     ):
         if name not in STEP_VERSIONS:
             raise ValueError(f"no step called {name!r}; known are {', '.join(STEP_VERSIONS)}")
-        self.name = name
+        self.name = name if part is None else f"{name}-{part}"
         self.root = config.root
         self.inputs = sorted(dict.fromkeys(Path(path) for path in inputs))
         self.outputs = sorted(dict.fromkeys(Path(path) for path in outputs))
-        self.key = settings_digest(
-            {"step": name, "version": STEP_VERSIONS[name], "settings": settings}, self.root
-        )
-        self.stamp = config.data.paths.interim / "stages" / f"{name}.json"
+        key = {"step": name, "version": STEP_VERSIONS[name], "settings": settings}
+        if part is not None:
+            key["part"] = part
+        self.key = settings_digest(key, self.root)
+        self.stamp = config.data.paths.interim / "stages" / f"{self.name}.json"
 
     def _digests(self, paths: list[Path]) -> dict[str, str] | None:
         """Path (relative to the root) -> SHA-256, or None if a file is missing."""

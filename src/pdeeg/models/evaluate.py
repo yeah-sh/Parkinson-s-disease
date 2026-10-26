@@ -8,6 +8,7 @@ on the pooled out-of-fold predictions.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +19,14 @@ from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
 
 from pdeeg.config import Config
-from pdeeg.models.cv import check_grouped, outer_splitter, permuted_labels, search, seed_for
+from pdeeg.models.cv import (
+    check_grouped,
+    outer_splitter,
+    permuted_labels,
+    search,
+    seed_for,
+    weighted_fit,
+)
 from pdeeg.models.data import TaskData
 
 METRICS = ("balanced_accuracy", "roc_auc", "sensitivity", "specificity")
@@ -54,17 +62,47 @@ def _weights(pipeline, n_features: int) -> np.ndarray:
     return full
 
 
+def counting_warnings(fit: Callable[[], object]) -> int:
+    """Call ``fit``; returns how many of the fits in it did not converge.
+
+    Counted are only the convergence warnings; the rest go on as usual.
+    """
+    n_warnings = 0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        fit()
+    for caught_warning in caught:
+        if issubclass(caught_warning.category, ConvergenceWarning):
+            n_warnings += 1
+        else:
+            warnings.showwarning(
+                caught_warning.message,
+                caught_warning.category,
+                caught_warning.filename,
+                caught_warning.lineno,
+            )
+    return n_warnings
+
+
+def fit_counting_warnings(
+    estimator, X: np.ndarray, y: np.ndarray, groups: np.ndarray, weights: np.ndarray | None
+) -> int:
+    """Fit ``estimator`` (see :func:`weighted_fit`); returns how many fits did not converge."""
+    return counting_warnings(lambda: weighted_fit(estimator, X, y, groups, weights))
+
+
 def nested_cv(
     data: TaskData, model: str, config: Config, seed: int, y: np.ndarray | None = None
 ) -> Predictions:
     """Out-of-fold predictions of ``model`` for every row of ``data``.
 
     ``y`` replaces the labels (for a permutation). The outer split is drawn with ``seed``, the
-    inner ones with seeds derived from it.
+    inner ones with seeds derived from it. The weights of ``data``, if any, go into every fit
+    and every inner-loop score.
     """
     settings = config.model
     y = data.y if y is None else np.asarray(y)
-    X, groups = data.X, data.groups
+    X, groups, sample_weight = data.X, data.groups, data.weights
     score = np.full(len(y), np.nan)
     predicted = np.full(len(y), -1)
     fold = np.full(len(y), -1)
@@ -72,20 +110,10 @@ def nested_cv(
     splits = outer_splitter(settings.cv, seed).split(X, y, groups)
     for k, (train, test) in enumerate(splits):
         check_grouped(train, test, groups)
-        tuned = search(model, settings, X.shape[1], seed_for(seed, "inner", k))
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", ConvergenceWarning)
-            tuned.fit(X[train], y[train], groups=groups[train])
-        for caught_warning in caught:
-            if issubclass(caught_warning.category, ConvergenceWarning):
-                n_warnings += 1
-            else:  # counted are only the convergence warnings; the rest go on as usual
-                warnings.showwarning(
-                    caught_warning.message,
-                    caught_warning.category,
-                    caught_warning.filename,
-                    caught_warning.lineno,
-                )
+        weighted = sample_weight is not None
+        tuned = search(model, settings, X.shape[1], seed_for(seed, "inner", k), weighted=weighted)
+        held = sample_weight[train] if weighted else None
+        n_warnings += fit_counting_warnings(tuned, X[train], y[train], groups[train], held)
         score[test] = tuned.decision_function(X[test])
         predicted[test] = tuned.predict(X[test])
         fold[test] = k
@@ -96,15 +124,22 @@ def nested_cv(
     return Predictions(score, predicted, fold, np.array(weights), best, n_warnings)
 
 
-def metrics(y: np.ndarray, score: np.ndarray, predicted: np.ndarray) -> dict[str, float]:
-    """Balanced accuracy, ROC AUC, sensitivity (positives found) and specificity."""
+def metrics(
+    y: np.ndarray, score: np.ndarray, predicted: np.ndarray, weights: np.ndarray | None = None
+) -> dict[str, float]:
+    """Balanced accuracy, ROC AUC, sensitivity (positives found) and specificity.
+
+    With ``weights``, every row counts by its weight (each participant once, for a task
+    weighted per participant).
+    """
     y = np.asarray(y)
     both = len(set(y)) == 2
+    w = {"sample_weight": weights}
     return {
-        "balanced_accuracy": float(balanced_accuracy_score(y, predicted)) if both else np.nan,
-        "roc_auc": float(roc_auc_score(y, score)) if both else np.nan,
-        "sensitivity": float(recall_score(y, predicted, pos_label=1, zero_division=np.nan)),
-        "specificity": float(recall_score(y, predicted, pos_label=0, zero_division=np.nan)),
+        "balanced_accuracy": float(balanced_accuracy_score(y, predicted, **w)) if both else np.nan,
+        "roc_auc": float(roc_auc_score(y, score, **w)) if both else np.nan,
+        "sensitivity": float(recall_score(y, predicted, pos_label=1, zero_division=np.nan, **w)),
+        "specificity": float(recall_score(y, predicted, pos_label=0, zero_division=np.nan, **w)),
     }
 
 
@@ -116,18 +151,21 @@ def bootstrap_metrics(
     n_resamples: int,
     confidence: float,
     rng: np.random.Generator,
+    weights: np.ndarray | None = None,
 ) -> dict[str, tuple[float, float]]:
     """Percentile intervals of :func:`metrics`, resampling participants with all their rows.
 
     The predictions stay as they are: the interval is about which participants happened to be
-    in the sample, not about how the models would change with other training data.
+    in the sample, not about how the models would change with other training data. Rows keep
+    their ``weights``.
     """
     names = np.unique(groups)
     rows = {name: np.flatnonzero(groups == name) for name in names}
     draws = []
     for _ in range(n_resamples):
         chosen = np.concatenate([rows[name] for name in rng.choice(names, size=names.size)])
-        draws.append(metrics(y[chosen], score[chosen], predicted[chosen]))
+        w = None if weights is None else weights[chosen]
+        draws.append(metrics(y[chosen], score[chosen], predicted[chosen], w))
     table = pd.DataFrame(draws)
     tail = 100.0 * (1.0 - confidence) / 2.0
     return {
@@ -138,9 +176,9 @@ def bootstrap_metrics(
 
 def _permutation(data: TaskData, model: str, config: Config, seed: int, i: int) -> dict:
     rng = np.random.default_rng(seed_for(seed, "permutation", i))
-    y = permuted_labels(data.y, data.groups, data.paired, rng)
+    y = permuted_labels(data.y, data.groups, data.within, rng)
     predictions = nested_cv(data, model, config, seed, y=y)
-    return metrics(y, predictions.score, predictions.predicted)
+    return metrics(y, predictions.score, predictions.predicted, data.weights)
 
 
 def permutation_null(
@@ -162,7 +200,9 @@ def permutation_p(observed: float, null: pd.Series) -> float:
 
 def _repeat(data: TaskData, model: str, config: Config, seed: int, r: int) -> float:
     predictions = nested_cv(data, model, config, seed_for(seed, "split repeat", r))
-    return metrics(data.y, predictions.score, predictions.predicted)["balanced_accuracy"]
+    return metrics(data.y, predictions.score, predictions.predicted, data.weights)[
+        "balanced_accuracy"
+    ]
 
 
 def split_repeats(
@@ -206,7 +246,7 @@ def evaluate(
     cv = config.model.cv
     seed = seed_for(config.model.random_state, task, feature_set, model)
     predictions = nested_cv(data, model, config, seed)
-    observed = metrics(data.y, predictions.score, predictions.predicted)
+    observed = metrics(data.y, predictions.score, predictions.predicted, data.weights)
     intervals = bootstrap_metrics(
         data.y,
         predictions.score,
@@ -215,6 +255,7 @@ def evaluate(
         cv.n_bootstrap,
         cv.confidence,
         np.random.default_rng(seed_for(seed, "bootstrap")),
+        data.weights,
     )
     null = permutation_null(data, model, config, seed, cv.n_permutations, n_jobs)
     p_values = {name: permutation_p(observed[name], null[name]) for name in METRICS}

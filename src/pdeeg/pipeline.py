@@ -1,11 +1,12 @@
-"""The pipeline, step by step: download, recordings, preprocess, features, stats, classify, report.
+"""The pipeline, step by step: download, recordings, preprocess, features, stats, classify,
+cascade, report.
 
 Every step is skipped when it is current. ``download``, ``recordings``, the band powers, the
-h(q) curves, ``stats`` and ``classify`` are keyed on their settings and the contents of their
-inputs (:mod:`pdeeg.stages`); preprocessing and the MFDFA runs use the per-recording caches of
-their own modules, keyed on the settings and the times of the input files. The reports are
-always rewritten from what is stored, which takes seconds and gives the same files for the same
-inputs.
+h(q) curves, ``stats``, ``classify`` and ``cascade`` are keyed on their settings and the contents
+of their inputs (:mod:`pdeeg.stages`); preprocessing and the MFDFA runs use the per-recording
+caches of their own modules, keyed on the settings and the times of the input files. The reports
+are always rewritten from what is stored, which takes seconds and gives the same files for the
+same inputs.
 """
 
 from __future__ import annotations
@@ -280,21 +281,25 @@ def summary_path(config: Config):
     return config.data.paths.processed / name
 
 
-def _classify_stage(config: Config) -> Stage:
+def _classify_stage(config: Config, task: str) -> Stage:
+    """The stamp of one task's evaluations; another task's settings do not enter it."""
     from pdeeg.features.tables import table_paths
     from pdeeg.models.classify import planned
     from pdeeg.models.store import stored_files
 
     data = config.data
     settings = {
-        "model": without(config.model, "n_jobs", "report", "figures_dir", "tracking"),
+        "model": without(
+            config.model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade"
+        ),
+        "task": config.model.tasks[task],
         "sessions": data.sessions,
         "regions": data.regions,
         "dataset": data.dataset,
     }
     inputs = [data.paths.recordings, *(table_paths(config, k)["wide"] for k in ("mfdfa", "psd"))]
-    outputs = [*stored_files(config, planned(config)), summary_path(config)]
-    return Stage(config, "classify", settings, inputs, outputs)
+    outputs = stored_files(config, [key for key in planned(config) if key[0] == task])
+    return Stage(config, "classify", settings, inputs, outputs, part=task)
 
 
 def classify_step(
@@ -305,7 +310,11 @@ def classify_step(
     write: bool = True,
     say: Say = print,
 ) -> None:
-    """Every evaluation, each tracked in MLflow, stored, and (with ``write``) the report."""
+    """Every evaluation, each tracked in MLflow, stored, and (with ``write``) the report.
+
+    Each task is skipped while it is current, so a task added to the configuration is the
+    only one that runs. The summary table and the report always cover every task.
+    """
     from pdeeg.features.tables import table_paths
     from pdeeg.models.classify import planned, run_classification, summary_table
     from pdeeg.models.store import load_evaluations, save_evaluations
@@ -313,27 +322,35 @@ def classify_step(
 
     recordings = read_recordings(config)
     tables = _tables(config, "wide")
-    stage = _classify_stage(config)
+    plan = planned(config)
     tracker = None
-    if not force and stage.is_current():
-        say("classify: current")
-        results = load_evaluations(config, recordings, tables, planned(config))
-    else:
-        inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
-        tracker = Tracker(config, inputs)
 
-        def show(result) -> None:
-            run_id = tracker.log(result)
-            say(
-                f"{result.task} / {result.feature_set} / {result.model}: balanced accuracy "
-                f"{result.observed['balanced_accuracy']:.2f} "
-                f"(p = {result.p_values['balanced_accuracy']:.3f}) - MLflow run {run_id}"
-            )
+    def show(result) -> None:
+        run_id = tracker.log(result)
+        say(
+            f"{result.task} / {result.feature_set} / {result.model}: balanced accuracy "
+            f"{result.observed['balanced_accuracy']:.2f} "
+            f"(p = {result.p_values['balanced_accuracy']:.3f}) - MLflow run {run_id}"
+        )
 
-        results = run_classification(config, recordings, tables, n_jobs=n_jobs, progress=show)
-        save_evaluations(config, results)
-        summary_table(results, config).to_parquet(summary_path(config), index=False)
+    results = []
+    for task in config.model.tasks:
+        part = [key for key in plan if key[0] == task]
+        stage = _classify_stage(config, task)
+        if not force and stage.is_current():
+            say(f"classify {task}: current")
+            results += load_evaluations(config, recordings, tables, part)
+            continue
+        if tracker is None:
+            inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
+            tracker = Tracker(config, inputs)
+        done = run_classification(
+            config, recordings, tables, n_jobs=n_jobs, progress=show, plan=part
+        )
+        save_evaluations(config, done)
         stage.done()
+        results += done
+    summary_table(results, config).to_parquet(summary_path(config), index=False)
     if write:
         files = _write_classification_report(config, results, say)
         if tracker is not None:
@@ -349,6 +366,83 @@ def _write_classification_report(config: Config, results, say: Say) -> list:
     return files
 
 
+def _cascade_stage(config: Config) -> Stage:
+    from pdeeg.features.tables import table_paths
+    from pdeeg.models.cascade import stored_cascade_files
+
+    data, model = config.data, config.model
+    cascade = model.cascade
+    settings = {
+        "model": without(model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade"),
+        "stage1": model.tasks[cascade.stage1],
+        "stage2": model.tasks[cascade.stage2],
+        "cascade": without(cascade, "report", "figures_dir"),
+        "sessions": data.sessions,
+        "regions": data.regions,
+        "dataset": data.dataset,
+    }
+    inputs = [data.paths.recordings, *(table_paths(config, k)["wide"] for k in ("mfdfa", "psd"))]
+    return Stage(config, "cascade", settings, inputs, stored_cascade_files(config))
+
+
+def cascade_step(
+    config: Config,
+    *,
+    n_jobs: int | None = None,
+    force: bool = False,
+    write: bool = True,
+    say: Say = print,
+) -> None:
+    """The two-stage cascade, stored, tracked in MLflow, and (with ``write``) its report."""
+    from pdeeg.features.tables import table_paths
+    from pdeeg.models.cascade import (
+        cascade_data,
+        evaluate_cascade,
+        load_cascade,
+        save_cascade,
+        stored_cascade_files,
+    )
+    from pdeeg.models.tracking import Tracker
+
+    recordings = read_recordings(config)
+    tables = _tables(config, "wide")
+    data = cascade_data(config, recordings, tables)
+    stage = _cascade_stage(config)
+    tracker = None
+    if not force and stage.is_current():
+        say("cascade: current")
+        result = load_cascade(config, data)
+    else:
+        jobs = config.model.n_jobs if n_jobs is None else n_jobs
+        result = evaluate_cascade(data, config, n_jobs=jobs)
+        save_cascade(config, result)
+        stage.done()
+        inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
+        tracker = Tracker(config, inputs)
+        run_id = tracker.log_cascade(result, stored_cascade_files(config))
+        p = result.p_values["macro_balanced_accuracy"]
+        say(
+            f"cascade / {result.feature_set} / {result.model}: macro balanced accuracy "
+            f"{result.observed['macro_balanced_accuracy']:.2f} (p = {p:.3f}) - MLflow run {run_id}"
+        )
+    if write:
+        files = _write_cascade_report(config, result, say)
+        if tracker is not None:
+            tracker.log_summary(files, task="cascade summary")
+
+
+def _write_cascade_report(config: Config, result, say: Say) -> list:
+    from pdeeg.models.cascade_report import write_report
+
+    path = summary_path(config)
+    summary = pd.read_parquet(path) if path.is_file() else None
+    if summary is None:
+        say(f"{path} not found; the cascade report leaves out the stages on their own")
+    files = write_report(config, result, summary)
+    say(f"cascade report -> {files[0]}")
+    return files
+
+
 def report_step(config: Config, *, say: Say = print) -> None:
     """Rewrite every report from what the steps stored; nothing is computed again.
 
@@ -356,16 +450,19 @@ def report_step(config: Config, *, say: Say = print) -> None:
     that makes them has to run first.
     """
     from pdeeg.features.report import write_report as write_mfdfa_report
+    from pdeeg.models.cascade import cascade_data, load_cascade
     from pdeeg.models.classify import planned
     from pdeeg.models.store import load_evaluations
     from pdeeg.preprocessing.report import write_report as write_preprocessing_report
     from pdeeg.stats.analysis import load_results
 
-    stale = [
-        command
-        for command, stage in (("stats", _stats_stage), ("classify", _classify_stage))
-        if not stage(config).is_current()
-    ]
+    stale = []
+    if not _stats_stage(config).is_current():
+        stale.append("stats")
+    if not all(_classify_stage(config, task).is_current() for task in config.model.tasks):
+        stale.append("classify")
+    if not _cascade_stage(config).is_current():
+        stale.append("cascade")
     if stale:
         raise StepFailed(
             "stored results do not match their inputs or settings; run "
@@ -381,6 +478,8 @@ def report_step(config: Config, *, say: Say = print) -> None:
     wide = _tables(config, "wide")
     results = load_evaluations(config, recordings, wide, planned(config))
     _write_classification_report(config, results, say)
+    data = cascade_data(config, recordings, wide)
+    _write_cascade_report(config, load_cascade(config, data), say)
 
 
 def all_steps(config: Config, *, force: bool = False, say: Say = print) -> None:
@@ -394,3 +493,4 @@ def all_steps(config: Config, *, force: bool = False, say: Say = print) -> None:
     features_step(config, force=force, say=say)
     stats_step(config, force=force, say=say)
     classify_step(config, force=force, say=say)
+    cascade_step(config, force=force, say=say)

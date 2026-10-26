@@ -47,6 +47,7 @@ def save_evaluation(config: Config, result: Evaluation) -> Path:
     data, predictions = result.data, result.predictions
     data.rows.assign(
         group=data.groups,
+        weight=1.0 if data.weights is None else data.weights,
         label=data.y,
         score=predictions.score,
         predicted=predictions.predicted,

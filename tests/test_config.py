@@ -15,7 +15,9 @@ def test_default_configs_load():
     assert config.data.paths.raw.is_absolute()
     assert config.data.paths.raw.is_relative_to(config.root)
     assert set(config.data.sessions) == {"hc", "off", "on"}
-    assert set(config.model.tasks) == {"pd_vs_hc", "off_vs_on"}
+    assert set(config.model.tasks) == {"pd_vs_hc", "off_vs_on", "pd_any_vs_hc", "off_vs_on_single"}
+    assert config.model.tasks["pd_any_vs_hc"].exclude_recordings == (("pd6", "on"), ("pd16", "on"))
+    assert config.model.cascade.report.is_relative_to(config.root)
     assert all(low < high for low, high in config.psd.bands.values())
     mfdfa = config.mfdfa
     assert set(mfdfa.broadband.fit_ranges) == {"short", "long"}
@@ -41,6 +43,30 @@ def test_mfdfa_settings_are_validated(tmp_path, old, new, message):
 
     with pytest.raises(ConfigError, match=message):
         load_config(CONFIG_DIR, overrides={"mfdfa": changed})
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("weights: per_participant", "weights: per_person", "per_recording or per_participant"),
+        ('[[pd6, "on"], [pd16, "on"]]', '[[pd6, "later"]]', "unknown session"),
+        ("stage2: off_vs_on_single", "stage2: off_vs_on", "is paired"),
+        ("stage1: pd_any_vs_hc", "stage1: pd_vs_hc", "positive side of stage1"),
+        ("stage1: pd_any_vs_hc", "stage1: off_vs_on_single", "one group with another"),
+        ("model: logistic_regression", "model: linear_svm", "needs probabilities"),
+        ("feature_set: psd_mfdfa", "feature_set: eeg", "no feature set"),
+        ("method: sigmoid", "method: beta", "sigmoid or isotonic"),
+        ("n_bins: 5", "n_bins: 1", "at least 2 bins"),
+    ],
+)
+def test_model_settings_are_validated(tmp_path, old, new, message):
+    text = (CONFIG_DIR / "model.yaml").read_text(encoding="utf-8")
+    assert text.count(old) == 1
+    changed = tmp_path / "model.yaml"
+    changed.write_text(text.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(CONFIG_DIR, overrides={"model": changed})
 
 
 def test_stats_config_holds_the_pre_registered_primary_features():

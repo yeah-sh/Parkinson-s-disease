@@ -15,12 +15,19 @@ level: region
 channel_k: [10, 30, 100]
 
 # Each task contrasts two sets of conditions (names come from sessions in data.yaml).
+# exclude_recordings and weights were added on 2026-10-26 with the tasks at the end of this list;
+# for (A) and (B) they are empty and per_recording, which is what these tasks always did.
+# exclude_recordings drops single recordings, as [subject, session] pairs. weights:
+# per_recording counts every recording once; per_participant gives each participant a total
+# weight of 1 over their recordings, in training, in the inner-loop scores and in every metric.
 tasks:
   pd_vs_hc:           # (A) unmedicated patients against controls: one recording per participant
     positive: [PD_OFF]
     negative: [HC]
     paired: false
     exclude_subjects: []
+    exclude_recordings: []
+    weights: per_recording
   off_vs_on:          # (B) the same patients in both classes
     positive: [PD_OFF]
     negative: [PD_ON]
@@ -32,10 +39,39 @@ tasks:
     # Their ON sessions were exported already preprocessed (configs/stats.yaml), so a classifier
     # could learn the processing instead of the medication.
     exclude_subjects: [pd6, pd16]
+    exclude_recordings: []
+    weights: per_recording
+
+  # --- Added on 2026-10-26, AFTER the pre-registration above, and before any classifier had
+  # been run on the data. Why: the project is turned into a two-stage research tool for a single
+  # recording: stage 1 asks patient or control, stage 2 asks (for a patient) OFF or ON. Neither
+  # task above fits that. (A) uses only OFF recordings, but a patient seen in practice is usually
+  # ON; (B) centres each patient on their own two recordings, so it needs both and cannot label
+  # one recording on its own. (B) stays as the paired mode of stage 2.
+  pd_any_vs_hc:       # (C) stage 1: patients in either state against controls
+    positive: [PD_OFF, PD_ON]
+    negative: [HC]
+    paired: false
+    exclude_subjects: []
+    # The ON sessions of pd6 and pd16 were exported already preprocessed (see (B)); their OFF
+    # sessions are kept.
+    exclude_recordings: [[pd6, "on"], [pd16, "on"]]
+    # Both sessions of a patient are used, at 0.5 each (1 for pd6 and pd16), so that every
+    # participant counts once and the classes stay 15 against 16 people. Splits are by
+    # participant, so a patient's two recordings are always on the same side.
+    weights: per_participant
+  off_vs_on_single:   # (D) stage 2, single-recording mode: each recording on its own
+    positive: [PD_OFF]
+    negative: [PD_ON]
+    paired: false     # no centring: the classifier sees one recording and nothing else
+    exclude_subjects: [pd6, pd16]   # as in (B)
+    exclude_recordings: []
+    weights: per_recording          # every patient has one recording of each class
+    # Both classes come from the same patients, so labels are permuted within patients.
 
 # Feature sets of the ablation, by the tables they draw on: "psd" and "mfdfa" are the wide
 # feature tables, "confounds" is age and sex (1 for m, 0 for f). Age and sex do not change within
-# a patient, so a set of confounds alone is not run for a paired task.
+# a patient, so a set of confounds alone is not run for a task within patients ((B) and (D)).
 feature_sets:
   psd: [psd]
   mfdfa: [mfdfa]
@@ -88,3 +124,29 @@ tracking:
 report: reports/classification_results.md
 figures_dir: reports/figures/classification
 n_jobs: 18            # permutations run in parallel; does not affect the results
+
+# --- The two-stage cascade (pdeeg.models.cascade, `pdeeg cascade`). Added on 2026-10-26, AFTER
+# the pre-registration above and before any classifier had been run on the data, for the reason
+# given at tasks (C) and (D). In every outer fold (cv above: grouped by participant), stage 1 and
+# stage 2 are each tuned and fitted on the training participants alone, with their own inner
+# loop, and every held-out recording is called HC, PD_OFF or PD_ON: HC if stage 1 says so, else
+# stage 2 decides. The permutation test, the bootstrap and the other splits are those of cv.
+cascade:
+  stage1: pd_any_vs_hc
+  stage2: off_vs_on_single
+  # One configuration, fixed before any result: every feature (no feature set is picked on
+  # results), and logistic regression, whose probabilities the calibration below needs, with
+  # the elastic-net grid of classifiers.logistic_regression.
+  feature_set: psd_mfdfa
+  model: logistic_regression
+  calibration:
+    # Platt scaling, fitted inside every outer training set on grouped inner-fold predictions,
+    # is always computed next to the raw probabilities, and a rule fixed in advance
+    # (pdeeg.models.calibration) says which to use. Isotonic regression is not used: it is a
+    # free step function, and with about 25 training participants per fold it would overfit.
+    method: sigmoid
+    # Reliability diagrams: bins of equal count, about 9 recordings each for stage 1 (44) and 6
+    # for stage 2 (28).
+    n_bins: 5
+  report: reports/cascade_results.md
+  figures_dir: reports/figures/cascade

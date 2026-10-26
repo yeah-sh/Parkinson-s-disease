@@ -20,6 +20,7 @@ from test_stats_analysis import stats_config, synthetic_recordings
 from test_stats_analysis import synthetic_tables as long_tables
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+TASKS = ["pd_vs_hc", "off_vs_on", "pd_any_vs_hc", "off_vs_on_single"]
 
 
 def pipeline_config(root: Path):
@@ -28,7 +29,16 @@ def pipeline_config(root: Path):
         shutil.copytree(CONFIG_DIR, root / "configs")
     config = dataclasses.replace(stats_config(root), root=root, config_dir=root / "configs")
     model = small_config(root, n_permutations=4, n_bootstrap=50, split_repeats=1).model
-    model = dataclasses.replace(model, feature_sets={"psd": ("psd",), "age_sex": ("confounds",)})
+    model = dataclasses.replace(
+        model,
+        feature_sets={"psd": ("psd",), "age_sex": ("confounds",)},
+        cascade=dataclasses.replace(
+            model.cascade,
+            feature_set="psd",
+            report=root / "reports" / "cascade_results.md",
+            figures_dir=root / "reports" / "figures" / "cascade",
+        ),
+    )
     paths = dataclasses.replace(
         config.data.paths,
         raw=root / "raw",
@@ -55,16 +65,17 @@ def write_inputs(config) -> None:
 
 
 def report_files(config) -> dict[str, str]:
-    """Every report and figure of the statistics and the classification, by SHA-256."""
-    files = [config.stats.report, config.model.report]
-    for folder in (config.stats.figures_dir, config.model.figures_dir):
+    """Every report and figure of the statistics, classification and cascade, by SHA-256."""
+    cascade = config.model.cascade
+    files = [config.stats.report, config.model.report, cascade.report]
+    for folder in (config.stats.figures_dir, config.model.figures_dir, cascade.figures_dir):
         files += sorted(folder.glob("*.png"))
     return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in files}
 
 
 @pytest.fixture(scope="module")
 def ran(tmp_path_factory):
-    """Statistics and classification run twice on the same inputs."""
+    """Statistics, classification and the cascade run twice on the same inputs."""
     root = tmp_path_factory.mktemp("pipeline")
     config = pipeline_config(root)
     write_inputs(config)
@@ -74,6 +85,7 @@ def ran(tmp_path_factory):
         said[run] = []
         pipeline.stats_step(config, say=said[run].append)
         pipeline.classify_step(config, say=said[run].append)
+        pipeline.cascade_step(config, say=said[run].append)
         hashes[run] = report_files(config)
     return config, said, hashes
 
@@ -86,7 +98,10 @@ def test_nothing_is_written_outside_the_temporary_project(ran):
     assert config.stats.report.is_relative_to(root) and config.model.report.is_relative_to(root)
     assert config.model.tracking.db.is_relative_to(root)
     assert (config.data.paths.interim / "stages" / "stats.json").is_file()
-    assert (config.data.paths.interim / "stages" / "classify.json").is_file()
+    for task in config.model.tasks:  # a stamp per task
+        assert (config.data.paths.interim / "stages" / f"classify-{task}.json").is_file()
+    assert (config.data.paths.interim / "stages" / "cascade.json").is_file()
+    assert config.model.cascade.report.is_relative_to(root)
 
 
 def test_the_second_run_finds_both_steps_current(ran):
@@ -95,14 +110,17 @@ def test_the_second_run_finds_both_steps_current(ran):
     assert any(line.startswith("stats: ") and "tests ->" in line for line in said["first"])
     assert any("MLflow run" in line for line in said["first"])
     assert "stats: current" in said["second"]
-    assert "classify: current" in said["second"]
+    assert {f"classify {task}: current" for task in TASKS} <= set(said["second"])
+    assert any(line.startswith("cascade / psd / logistic_regression:") for line in said["first"])
+    assert "cascade: current" in said["second"]
     assert not any("MLflow run" in line for line in said["second"])
 
 
 def test_reports_and_figures_are_byte_for_byte_the_same(ran):
     _, _, hashes = ran
 
-    assert len(hashes["first"]) >= 6
+    assert len(hashes["first"]) >= 10
+    assert {"cascade_results.md", "confusion.png", "reliability.png"} <= set(hashes["first"])
     assert hashes["first"] == hashes["second"]
 
 
@@ -110,7 +128,8 @@ def test_every_planned_evaluation_is_stored(ran):
     config, _, _ = ran
     plan = planned(config)
 
-    assert len(plan) == 3 * 2 + 3  # both feature sets for PD vs HC, no age and sex within people
+    # Both feature sets between people, band power alone within patients (no age and sex).
+    assert len(plan) == 3 * (2 + 1 + 2 + 1)
     assert all(path.is_file() for path in stored_files(config, plan))
     summary = json.loads((stored_files(config, plan)[3]).read_text(encoding="utf-8"))
     assert set(summary["observed"]) == {
@@ -137,6 +156,28 @@ def test_a_changed_setting_or_input_runs_the_step_again(ran, tmp_path):
     assert said[0].startswith("stats: ") and said[0] != "stats: current"
 
 
+def test_a_task_added_later_is_the_only_one_that_runs(ran, tmp_path):
+    config, _, _ = ran
+    copy = tmp_path / "copy"
+    shutil.copytree(config.root, copy)
+    moved = pipeline_config(copy)
+    model = moved.model
+    extra = dataclasses.replace(model.tasks["pd_vs_hc"], positive=("PD_ON",))
+    added = dataclasses.replace(
+        moved, model=dataclasses.replace(model, tasks=model.tasks | {"on_vs_hc": extra})
+    )
+    said = []
+
+    pipeline.classify_step(added, write=False, say=said.append)
+
+    assert {f"classify {task}: current" for task in TASKS} <= set(said)
+    runs = [line for line in said if "MLflow run" in line]
+    assert len(runs) == len([key for key in planned(added) if key[0] == "on_vs_hc"]) == 6
+    assert all(line.startswith("on_vs_hc / ") for line in runs)
+    summary = pd.read_parquet(pipeline.summary_path(added))
+    assert list(dict.fromkeys(summary["task"])) == [*TASKS, "on_vs_hc"]
+
+
 def test_the_report_step_refuses_results_older_than_their_inputs(ran, tmp_path):
     config, _, _ = ran
     copy = tmp_path / "copy"
@@ -157,7 +198,7 @@ def test_stored_evaluations_must_match_the_data_they_are_loaded_for(ran):
     tables = {kind: pd.read_parquet(table_paths(config, kind)["wide"]) for kind in ("psd", "mfdfa")}
     fewer = recordings[recordings["subject"] != "hc3"]
 
-    assert len(load_evaluations(config, recordings, tables, planned(config))) == 9
+    assert len(load_evaluations(config, recordings, tables, planned(config))) == 18
     with pytest.raises(StoreError, match="other data"):
         load_evaluations(config, fewer, tables, planned(config))
 
@@ -203,7 +244,8 @@ def test_a_directory_of_another_version_is_refused(tmp_path):
 def test_every_step_is_a_command():
     commands = cli.build_parser()._subparsers._group_actions[0].choices
 
-    for name in ("download", "preprocess", "features", "stats", "classify", "report", "all"):
+    steps = ("download", "preprocess", "features", "stats", "classify", "cascade", "report", "all")
+    for name in steps:
         assert name in commands
     assert cli.build_parser().parse_args(["all", "--force"]).force
 

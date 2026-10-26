@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 
 import numpy as np
+import sklearn
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import get_scorer
 from sklearn.model_selection import (
     BaseCrossValidator,
     GridSearchCV,
@@ -47,6 +49,10 @@ def outer_splitter(cv: CvConfig, seed: int) -> BaseCrossValidator:
 
 class CheckedSplitter(BaseCrossValidator):
     """A grouped splitter that raises :class:`LeakageError` if a split ever shares a group."""
+
+    # With metadata routing (the weighted tasks), a search passes groups only to a splitter that
+    # asks for them; without it, groups are always passed.
+    __metadata_request__split = {"groups": True}
 
     def __init__(self, splitter: BaseCrossValidator):
         self.splitter = splitter
@@ -96,14 +102,24 @@ def classifier(name: str, config: ModelConfig, seed: int) -> tuple[object, dict[
     raise ValueError(f"unknown model {name!r}; known are {', '.join(MODELS)}")
 
 
-def search(name: str, config: ModelConfig, n_features: int, seed: int) -> GridSearchCV:
+def search(
+    name: str, config: ModelConfig, n_features: int, seed: int, *, weighted: bool = False
+) -> GridSearchCV:
     """Scaling, (for channels) selection and the model in one Pipeline, tuned by grouped CV.
 
     Everything is fitted on the training rows it is given, inside every inner fold and again
-    on all of them for the refit.
+    on all of them for the refit. ``weighted``: the scaler, the model and the inner score take
+    ``sample_weight``; fit it inside :func:`weighted_fit`.
     """
     model, grid = classifier(name, config, seed)
-    steps = [("scale", StandardScaler())]
+    scale = StandardScaler()
+    scoring = config.cv.inner_scoring
+    if weighted:
+        with sklearn.config_context(enable_metadata_routing=True):
+            scale.set_fit_request(sample_weight=True)
+            model.set_fit_request(sample_weight=True)
+            scoring = get_scorer(scoring).set_score_request(sample_weight=True)
+    steps = [("scale", scale)]
     if config.level == "channel":
         steps.append(("select", SelectKBest(f_classif)))
         grid["select__k"] = sorted({min(k, n_features) for k in config.channel_k})
@@ -112,30 +128,42 @@ def search(name: str, config: ModelConfig, n_features: int, seed: int) -> GridSe
         Pipeline(steps),
         grid,
         cv=inner_splitter(config.cv, seed),
-        scoring=config.cv.inner_scoring,
+        scoring=scoring,
         n_jobs=1,
         refit=True,
         error_score="raise",
     )
 
 
+def weighted_fit(estimator, X: np.ndarray, y: np.ndarray, groups: np.ndarray, weights):
+    """Fit a search of :func:`search` (``weighted`` when ``weights`` is not None) on rows.
+
+    With weights, scikit-learn's metadata routing hands them to the scaler, the model and the
+    inner score, and the groups to the splitter; it is switched on for this fit only.
+    """
+    if weights is None:
+        return estimator.fit(X, y, groups=groups)
+    with sklearn.config_context(enable_metadata_routing=True):
+        return estimator.fit(X, y, groups=groups, sample_weight=weights)
+
+
 def permuted_labels(
-    y: np.ndarray, groups: np.ndarray, paired: bool, rng: np.random.Generator
+    y: np.ndarray, groups: np.ndarray, within: bool, rng: np.random.Generator
 ) -> np.ndarray:
     """Labels shuffled the way the null hypothesis allows.
 
-    Unpaired: whole participants swap labels (a participant's rows keep one label). Paired:
-    within every participant the labels are swapped or not, with even odds, so each still has
-    one recording of each side.
+    Between participants: whole participants swap labels (a participant's rows keep one
+    label). Within participants: every participant's labels are all swapped or all kept, with
+    even odds, so a participant with one recording of each side still has one of each.
     """
     y, groups = np.asarray(y), np.asarray(groups)
     labels = {}
     for group in np.unique(groups):
         held = y[groups == group]
-        if not paired and len(set(held)) > 1:
-            raise ValueError(f"participant {group} has both labels in an unpaired task")
+        if not within and len(set(held)) > 1:
+            raise ValueError(f"participant {group} has both labels in a task between people")
         labels[group] = held
-    if paired:
+    if within:
         flip = dict(zip(labels, rng.random(len(labels)) < 0.5, strict=True))
         return np.where([flip[group] for group in groups], 1 - y, y)
     order = list(labels)

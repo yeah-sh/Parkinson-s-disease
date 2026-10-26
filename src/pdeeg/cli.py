@@ -1,8 +1,8 @@
 """Command-line entry point, installed as ``pdeeg``.
 
 ``pdeeg all`` runs the whole pipeline: download, recordings, preprocess, features, stats,
-classify, report. Each of them is also a command, and every step is skipped while it is current
-(:mod:`pdeeg.pipeline`), so running ``pdeeg all`` again only does what a change calls for.
+classify, cascade, report. Each of them is also a command, and every step is skipped while it is
+current (:mod:`pdeeg.pipeline`), so running ``pdeeg all`` again only does what a change calls for.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ STEPS = {
     "features": "band power, MFDFA with surrogates, and h(q) curves for every recording",
     "stats": "the pre-registered cluster tests of the features",
     "classify": "nested cross-validated classification, tracked with MLflow",
+    "cascade": "two stages on one recording: patient or control, then OFF or ON medication",
     "report": "write every report again from what the steps stored",
 }
 PARTS = {
@@ -46,12 +47,14 @@ def _known_errors() -> tuple[type[Exception], ...]:
     from pdeeg.data.bids import DatasetError
     from pdeeg.data.download import DownloadError
     from pdeeg.features.tables import TablesError
+    from pdeeg.models.cascade import CascadeStoreError
     from pdeeg.models.data import TaskError
     from pdeeg.models.store import StoreError
     from pdeeg.pipeline import StepFailed
     from pdeeg.stats.features import StatsError
 
     return (
+        CascadeStoreError,
         DatasetError,
         DownloadError,
         StatsError,
@@ -81,6 +84,7 @@ def _run(command: str, config: Config, args: argparse.Namespace) -> None:
         "mfdfa-curves": lambda: pipeline.curves_step(config, n_jobs=n_jobs, force=force, say=_say),
         "stats": lambda: pipeline.stats_step(config, n_jobs=n_jobs, force=force, say=_say),
         "classify": lambda: pipeline.classify_step(config, n_jobs=n_jobs, force=force, say=_say),
+        "cascade": lambda: pipeline.cascade_step(config, n_jobs=n_jobs, force=force, say=_say),
         "report": lambda: pipeline.report_step(config, say=_say),
         "all": lambda: pipeline.all_steps(config, force=force, say=_say),
     }
@@ -151,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
         step = commands.add_parser(name, help=text)
         if name != "report":
             _add_force(step)
-        if name in ("preprocess", "features", "stats", "classify"):
+        if name in ("preprocess", "features", "stats", "classify", "cascade"):
             _add_n_jobs(step, "processes to use")
     preprocess = commands.choices["preprocess"]
     preprocess.add_argument(

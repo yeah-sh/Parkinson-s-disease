@@ -18,14 +18,15 @@ GLOBAL := $(if $(CONFIG_DIR),--config-dir "$(CONFIG_DIR)")
 FORCE_FLAG := $(if $(FORCE),--force)
 JOBS_FLAG := $(if $(N_JOBS),--n-jobs $(N_JOBS))
 
-PARALLEL_STEPS := preprocess features stats classify psd-features mfdfa-features mfdfa-curves
+PARALLEL_STEPS := preprocess features stats classify cascade psd-features mfdfa-features \
+	mfdfa-curves
 
 .DEFAULT_GOAL := help
 .PHONY: help install install-app all download recordings $(PARALLEL_STEPS) report \
 	mfdfa-scaling config test lint format docker-build docker-run app
 
 help:
-	@echo "Pipeline:  all download recordings preprocess features stats classify report"
+	@echo "Pipeline:  all download recordings preprocess features stats classify cascade report"
 	@echo "Parts:     psd-features mfdfa-features mfdfa-curves mfdfa-scaling config"
 	@echo "Options:   FORCE=1 (run even if current), N_JOBS=n, CONFIG_DIR=path"
 	@echo "Project:   install install-app test lint format docker-build docker-run app"

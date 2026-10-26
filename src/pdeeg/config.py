@@ -236,6 +236,8 @@ class TaskConfig:
     negative: tuple[str, ...]
     paired: bool
     exclude_subjects: tuple[str, ...]
+    exclude_recordings: tuple[tuple[str, str], ...]  # (subject, session)
+    weights: str  # per_recording or per_participant
 
 
 @dataclass(frozen=True)
@@ -285,6 +287,23 @@ class TrackingConfig:
 
 
 @dataclass(frozen=True)
+class CalibrationConfig:
+    method: str
+    n_bins: int
+
+
+@dataclass(frozen=True)
+class CascadeConfig:
+    stage1: str
+    stage2: str
+    feature_set: str
+    model: str
+    calibration: CalibrationConfig
+    report: Path
+    figures_dir: Path
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     random_state: int
     segments: str
@@ -298,6 +317,7 @@ class ModelConfig:
     report: Path
     figures_dir: Path
     n_jobs: int
+    cascade: CascadeConfig
 
 
 # --- stats.yaml --------------------------------------------------------------------------------
@@ -552,6 +572,19 @@ def _validate_model(config: Config) -> None:
             raise ConfigError(f"model.tasks.{name}: a condition is on both sides")
         if task.paired and len({groups[c] for c in (*task.positive, *task.negative)}) != 1:
             raise ConfigError(f"model.tasks.{name}: a paired task compares conditions of one group")
+        if task.weights not in ("per_recording", "per_participant"):
+            raise ConfigError(
+                f"model.tasks.{name}.weights: expected per_recording or per_participant, "
+                f"got {task.weights!r}"
+            )
+        if task.paired and task.weights != "per_recording":
+            raise ConfigError(f"model.tasks.{name}: a paired task weighs every recording alike")
+        unknown = sorted({session for _, session in task.exclude_recordings} - set(sessions))
+        if unknown:
+            raise ConfigError(
+                f"model.tasks.{name}.exclude_recordings: unknown session(s) {', '.join(unknown)}; "
+                f"data.sessions defines {', '.join(sessions)}"
+            )
     for name, tables in model.feature_sets.items():
         unknown = sorted(set(tables) - {"psd", "mfdfa", "confounds"})
         if unknown or not tables:
@@ -582,6 +615,43 @@ def _validate_model(config: Config) -> None:
         raise ConfigError(f"model.cv.confidence: must lie between 0 and 1, got {cv.confidence}")
     if not model.channel_k or min(model.channel_k) < 1:
         raise ConfigError("model.channel_k: needs at least one k of 1 or more")
+    _validate_cascade(config)
+
+
+def _validate_cascade(config: Config) -> None:
+    """model.cascade: stage 1 tells groups apart, stage 2 the conditions of its positive side."""
+    model = config.model
+    cascade = model.cascade
+    groups = {session.condition: session.group for session in config.data.sessions.values()}
+    for where in ("stage1", "stage2"):
+        task = getattr(cascade, where)
+        if task not in model.tasks:
+            raise ConfigError(f"model.cascade.{where}: no task {task!r} in model.tasks")
+        if model.tasks[task].paired:
+            raise ConfigError(
+                f"model.cascade.{where}: {task} is paired; a cascade classifies single recordings"
+            )
+    first, second = model.tasks[cascade.stage1], model.tasks[cascade.stage2]
+    if len({groups[c] for c in (*first.positive, *first.negative)}) != 2:
+        raise ConfigError("model.cascade.stage1: must compare one group with another")
+    if set((*second.positive, *second.negative)) != set(first.positive):
+        raise ConfigError(
+            "model.cascade.stage2: its conditions must be those of the positive side of stage1"
+        )
+    if cascade.feature_set not in model.feature_sets:
+        raise ConfigError(f"model.cascade.feature_set: no feature set {cascade.feature_set!r}")
+    if cascade.model not in ("logistic_regression", "gradient_boosting"):
+        raise ConfigError(
+            "model.cascade.model: needs probabilities, so logistic_regression or "
+            f"gradient_boosting, got {cascade.model!r}"
+        )
+    if cascade.calibration.method not in ("sigmoid", "isotonic"):
+        raise ConfigError(
+            "model.cascade.calibration.method: expected sigmoid or isotonic, "
+            f"got {cascade.calibration.method!r}"
+        )
+    if cascade.calibration.n_bins < 2:
+        raise ConfigError("model.cascade.calibration.n_bins: needs at least 2 bins")
 
 
 def _validate_stats(config: Config) -> None:

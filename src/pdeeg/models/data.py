@@ -31,7 +31,9 @@ class TaskData:
     ``X`` is recordings x features and ``y`` is 1 for the positive conditions. ``groups`` holds
     the participant of every row: splits never separate rows with the same group. ``rows`` has
     ``subject``, ``session`` and ``condition`` for every row, ``features`` the column names, and
-    ``left_out`` the participants dropped for a missing value.
+    ``left_out`` the participants dropped for a missing value. ``weights`` is None when every
+    recording counts once, else each row's weight (a participant's rows sum to 1). ``within``
+    says that both classes come from the same participants, so labels are permuted within them.
     """
 
     X: np.ndarray
@@ -41,6 +43,8 @@ class TaskData:
     features: list[str]
     paired: bool
     left_out: list[str]
+    weights: np.ndarray | None = None
+    within: bool = False
 
 
 def site_of(column: str) -> str:
@@ -77,30 +81,51 @@ def wide_features(wide: pd.DataFrame, config: Config) -> pd.DataFrame:
     return rows.set_index(_INDEX)[columns]
 
 
+def within_participants(config: Config, task: str) -> bool:
+    """Whether both classes of ``task`` come from one group of data.yaml, i.e. the same people."""
+    groups = {session.condition: session.group for session in config.data.sessions.values()}
+    settings = config.model.tasks[task]
+    return len({groups[c] for c in (*settings.positive, *settings.negative)}) == 1
+
+
 def applicable(config: Config, task: str, feature_set: str) -> bool:
     """Whether a feature set says anything in a task: age and sex alone do not, within people."""
     tables = config.model.feature_sets[feature_set]
-    return not (config.model.tasks[task].paired and set(tables) == {CONFOUNDS})
+    return not (within_participants(config, task) and set(tables) == {CONFOUNDS})
+
+
+def participant_weights(groups: np.ndarray) -> np.ndarray:
+    """One over the number of rows of each row's participant: everyone weighs 1 in total."""
+    groups = pd.Series(np.asarray(groups))
+    return 1.0 / groups.map(groups.value_counts()).to_numpy(dtype=float)
 
 
 def task_rows(config: Config, recordings: pd.DataFrame, task: str) -> pd.DataFrame:
     """The recordings of ``task`` with a ``label`` column, in the order of ``recordings``.
 
-    An unpaired task has one recording per participant; a paired one has, for every participant,
-    one recording of each side.
+    A paired task has, for every participant, one recording of each side. An unpaired task has
+    one recording per participant, unless its classes come from the same participants or its
+    weights are per participant.
     """
     settings = config.model.tasks[task]
     conditions = (*settings.positive, *settings.negative)
+    dropped = set(settings.exclude_recordings)
+    recording = pd.Series(list(zip(recordings["subject"], recordings["session"], strict=True)))
     rows = recordings[
         recordings["condition"].isin(conditions)
         & ~recordings["subject"].isin(settings.exclude_subjects)
+        & ~recording.isin(dropped).to_numpy()
     ].copy()
     rows["label"] = rows["condition"].isin(settings.positive).astype(int)
     per_person = rows.groupby("subject", sort=False)["label"].agg(["size", "sum"])
     if settings.paired:
         complete = per_person[(per_person["size"] == 2) & (per_person["sum"] == 1)].index
         rows = rows[rows["subject"].isin(complete)]
-    elif (per_person["size"] > 1).any():
+    elif (
+        settings.weights == "per_recording"
+        and not within_participants(config, task)
+        and (per_person["size"] > 1).any()
+    ):
         repeated = per_person.index[per_person["size"] > 1].tolist()
         raise TaskError(f"{task}: more than one recording for {', '.join(repeated)}")
     return rows.reset_index(drop=True)
@@ -129,8 +154,8 @@ def task_data(
     """The rows, labels, groups and features of ``task`` with ``feature_set``.
 
     ``tables`` maps ``psd`` and ``mfdfa`` to their wide tables. A participant with a missing
-    value in any feature is left out (with both recordings, in a paired task). In a paired task
-    the features are centred within participants.
+    value in any feature is left out with all their recordings. In a paired task the features
+    are centred within participants.
     """
     model = config.model
     settings = model.tasks[task]
@@ -166,4 +191,6 @@ def task_data(
         features=list(frame.columns),
         paired=settings.paired,
         left_out=missing,
+        weights=participant_weights(groups) if settings.weights == "per_participant" else None,
+        within=within_participants(config, task),
     )

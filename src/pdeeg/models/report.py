@@ -12,7 +12,7 @@ import pandas as pd
 from pdeeg.config import Config
 from pdeeg.models.classify import AUDIT_ABOVE, best_result, weight_table
 from pdeeg.models.cv import MODELS
-from pdeeg.models.data import CONFOUND_COLUMNS
+from pdeeg.models.data import CONFOUND_COLUMNS, within_participants
 from pdeeg.models.evaluate import Evaluation
 from pdeeg.stats.report import session_label
 from pdeeg.viz.classification import plot_ablation
@@ -38,7 +38,36 @@ def task_title(config: Config, task: str) -> str:
     conditions = {s.condition: name for name, s in config.data.sessions.items()}
     positive = " / ".join(session_label(config, conditions[c]) for c in settings.positive)
     negative = " / ".join(session_label(config, conditions[c]) for c in settings.negative)
-    return f"{positive} vs {negative}" + (", within patients" if settings.paired else "")
+    if settings.paired:
+        return f"{positive} vs {negative}, within patients"
+    if within_participants(config, task):
+        return f"{positive} vs {negative}, single recordings"
+    return f"{positive} vs {negative}"
+
+
+def design_sentence(config: Config, task: str) -> str:
+    """How a task's rows, weights and permutations are set up, for the Design section."""
+    settings = config.model.tasks[task]
+    if settings.paired:
+        return (
+            ". Each patient's features are centred on the mean of their two recordings, so "
+            "the question is which of a patient's two recordings is OFF; labels are "
+            "permuted within patients."
+        )
+    if within_participants(config, task):
+        return (
+            ". Every recording is classified on its own, without centring; both recordings of a "
+            "patient are always on the same side of a split, and labels are permuted within "
+            "patients."
+        )
+    if settings.weights == "per_participant":
+        return (
+            ". Every recording of a participant is used, weighted so that each participant "
+            "counts once (0.5 per recording of a patient with two) in training, in the "
+            "inner-loop scores and in every metric; all recordings of a participant are on the "
+            "same side of a split, and labels are permuted across participants."
+        )
+    return ". One recording per participant; labels are permuted across participants."
 
 
 def _image(path: Path, alt: str, base: Path) -> str:
@@ -253,12 +282,13 @@ def write_report(config: Config, results: list[Evaluation], table: pd.DataFrame)
                 else ""
             )
             + (
-                ". Each patient's features are centred on the mean of their two recordings, so "
-                "the question is which of a patient's two recordings is OFF; labels are "
-                "permuted within patients."
-                if settings.paired
-                else ". One recording per participant; labels are permuted across participants."
+                "; recordings left out: "
+                + ", ".join(f"{s} {t}" for s, t in settings.exclude_recordings)
+                + " (exported already preprocessed)"
+                if settings.exclude_recordings
+                else ""
             )
+            + design_sentence(config, task)
         )
     n_features = table.groupby("feature_set")["n_features"].first()
     lines += [

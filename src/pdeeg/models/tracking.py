@@ -21,6 +21,7 @@ import numpy as np
 import pandas as pd
 
 from pdeeg.config import Config
+from pdeeg.models.cascade import CascadeEvaluation
 from pdeeg.models.evaluate import METRICS, Evaluation
 
 
@@ -119,7 +120,13 @@ class Tracker:
                     "n_participants": len(np.unique(data.groups)),
                     "n_features": data.X.shape[1],
                     "paired": data.paired,
+                    "within": data.within,
+                    "weights": model.tasks[evaluation.task].weights,
                     "exclude_subjects": ",".join(model.tasks[evaluation.task].exclude_subjects),
+                    "exclude_recordings": ",".join(
+                        f"{subject}/{session}"
+                        for subject, session in model.tasks[evaluation.task].exclude_recordings
+                    ),
                     "left_out": ",".join(data.left_out),
                     "outer": model.cv.outer,
                     "outer_folds": model.cv.outer_folds,
@@ -161,11 +168,76 @@ class Tracker:
                     mlflow.log_artifact(str(path))
             return run.info.run_id
 
-    def log_summary(self, files: list[Path]) -> str:
-        """A run holding the report and its figures."""
+    def log_cascade(self, evaluation: CascadeEvaluation, files: list[Path]) -> str:
+        """One run for the cascade, with its stored ``files`` as artifacts; returns its id."""
         mlflow = self._mlflow
-        with mlflow.start_run(experiment_id=self.experiment_id, run_name="summary") as run:
-            mlflow.set_tags(self.tags | {"task": "summary"})
+        model = self.config.model
+        cascade = model.cascade
+        data = evaluation.data
+        name = f"cascade/{evaluation.feature_set}/{evaluation.model}"
+        grid = getattr(model.classifiers, evaluation.model)
+        with mlflow.start_run(experiment_id=self.experiment_id, run_name=name) as run:
+            mlflow.set_tags(
+                self.tags
+                | {
+                    "task": "cascade",
+                    "feature_set": evaluation.feature_set,
+                    "model": evaluation.model,
+                }
+            )
+            mlflow.log_params(
+                {
+                    "stage1": cascade.stage1,
+                    "stage2": cascade.stage2,
+                    "classes": ",".join(data.classes),
+                    "level": model.level,
+                    "segments": model.segments,
+                    "n_recordings": len(data.label),
+                    "n_participants": len(np.unique(data.groups)),
+                    "n_features": data.X.shape[1],
+                    "left_out": ",".join(data.left_out),
+                    "outer": model.cv.outer,
+                    "outer_folds": model.cv.outer_folds,
+                    "inner_folds": model.cv.inner_folds,
+                    "inner_scoring": model.cv.inner_scoring,
+                    "n_permutations": model.cv.n_permutations,
+                    "n_bootstrap": model.cv.n_bootstrap,
+                    "split_repeats": model.cv.split_repeats,
+                    "calibration_method": cascade.calibration.method,
+                    "grid": json.dumps(_plain(dataclasses.asdict(grid))),
+                    "seed": evaluation.seed,
+                }
+            )
+            values = {}
+            for metric, value in evaluation.observed.items():
+                low, high = evaluation.intervals[metric]
+                values |= {metric: value, f"{metric}_ci_low": low, f"{metric}_ci_high": high}
+            values |= {f"{metric}_p": p for metric, p in evaluation.p_values.items()}
+            for column in evaluation.repeats.columns:
+                values[f"split_repeat_{column}_median"] = float(evaluation.repeats[column].median())
+            calibration = evaluation.calibration
+            for stage in ("stage1", "stage2"):
+                for version in ("raw", "platt"):
+                    for metric, entry in calibration[stage][version]["summary"].items():
+                        values[f"{stage}_{version}_{metric}"] = entry["value"]
+                values[f"{stage}_poorly_calibrated"] = float(
+                    bool(calibration[stage]["raw"]["reasons"])
+                )
+            for version, value in calibration["three_class_brier"].items():
+                values[f"three_class_brier_{version}"] = value
+            values["convergence_warnings"] = evaluation.predictions.convergence_warnings
+            mlflow.log_metrics(
+                {key: float(value) for key, value in values.items() if value is not None}
+            )
+            for path in files:
+                mlflow.log_artifact(str(path))
+            return run.info.run_id
+
+    def log_summary(self, files: list[Path], task: str = "summary") -> str:
+        """A run holding a report and its figures."""
+        mlflow = self._mlflow
+        with mlflow.start_run(experiment_id=self.experiment_id, run_name=task) as run:
+            mlflow.set_tags(self.tags | {"task": task})
             for path in files:
                 mlflow.log_artifact(str(path))
             return run.info.run_id
@@ -176,6 +248,7 @@ def artifacts(evaluation: Evaluation) -> dict[str, Any]:
     data, predictions = evaluation.data, evaluation.predictions
     return {
         "predictions.parquet": data.rows.assign(
+            weight=1.0 if data.weights is None else data.weights,
             label=data.y,
             score=predictions.score,
             predicted=predictions.predicted,
