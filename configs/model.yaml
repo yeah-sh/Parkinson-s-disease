@@ -150,3 +150,13 @@ cascade:
     n_bins: 5
   report: reports/cascade_results.md
   figures_dir: reports/figures/cascade
+
+# --- The final models (`pdeeg train-final`, used by `pdeeg predict`). Added on 2026-10-26. -------
+# For each stage: the task, and the feature set and model with the best cross-validated balanced
+# accuracy of that task in the ablation above (age and sex alone left out; ties go to the higher
+# ROC AUC). It is written here from reports/classification_results.md after `pdeeg classify`,
+# before any final model is trained, and `pdeeg train-final` refuses to run if it is not that
+# best combination. Being the best of several on the same cross-validation, its score is
+# optimistic; the models' metadata says so and carries the cascade's pre-specified estimate too.
+# null until the ablation has been run.
+final: null

@@ -293,6 +293,55 @@ def is_current(recording: Mapping[str, Any], config: Config) -> bool:
     return min(path.stat().st_mtime for path in outputs) >= newest_input
 
 
+def clean_recording(
+    raw: mne.io.BaseRaw, recording: Mapping[str, Any], config: Config
+) -> dict[str, Any]:
+    """Clean a loaded recording and write its cleaned data, QC figures and log; returns the log.
+
+    ``raw`` is the scalp EEG of ``recording`` with the montage applied, as
+    :func:`pdeeg.data.bids.load_raw` gives it; ``recording`` needs ``subject``, ``session`` and
+    ``bids_path`` (recorded as the source). Raises :class:`RecordingTooShort`.
+    """
+    subject, session = recording["subject"], recording["session"]
+    paths = output_paths(config, subject, session)
+    # The log marks a finished recording, so it goes first and is written last.
+    paths["log"].unlink(missing_ok=True)
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+    with mne.use_log_level("WARNING"):
+        clean, ica, log = preprocess_raw(raw, config.preprocessing, config.data.dataset.line_freq)
+        title = f"sub-{subject} ses-{session}"
+        save(qc.plot_psd(log, config.preprocessing, title), paths["psd"])
+        removed = log["ica"]["removed"]
+        if removed:
+            save(qc.plot_removed_components(ica, clean.info, removed, title), paths["ica"])
+        else:
+            paths["ica"].unlink(missing_ok=True)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=_NAMING_WARNING)
+            clean.save(paths["raw"], overwrite=True)
+    log = {
+        "subject": subject,
+        "session": session,
+        "source": recording["bids_path"],
+        "config_hash": config_hash(config),
+        "pipeline_version": PIPELINE_VERSION,
+        "versions": {
+            "pdeeg": pdeeg.__version__,
+            "mne": mne.__version__,
+            "mne_icalabel": mne_icalabel.__version__,
+            "numpy": np.__version__,
+        },
+        "figures": {
+            "psd": paths["psd"].name,
+            "ica": paths["ica"].name if removed else None,
+        },
+        **log,
+    }
+    paths["log"].write_text(json.dumps(log, indent=1), encoding="utf-8")
+    return log
+
+
 def process_recording(
     recording: Mapping[str, Any], config: Config, *, force: bool = False
 ) -> dict[str, Any]:
@@ -308,48 +357,11 @@ def process_recording(
     try:
         if not force and is_current(recording, config):
             return result | {"status": "cached", "seconds": 0.0}
-        paths = output_paths(config, subject, session)
-
-        # The log marks a finished recording, so it goes first and is written last.
-        paths["log"].unlink(missing_ok=True)
-        for path in paths.values():
-            path.parent.mkdir(parents=True, exist_ok=True)
         with mne.use_log_level("WARNING"):
             raw = load_raw(
                 SimpleNamespace(**recording), config.data.paths.raw, config.data.dataset.montage
             )
-            clean, ica, log = preprocess_raw(
-                raw, config.preprocessing, config.data.dataset.line_freq
-            )
-            title = f"sub-{subject} ses-{session}"
-            save(qc.plot_psd(log, config.preprocessing, title), paths["psd"])
-            removed = log["ica"]["removed"]
-            if removed:
-                save(qc.plot_removed_components(ica, clean.info, removed, title), paths["ica"])
-            else:
-                paths["ica"].unlink(missing_ok=True)
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message=_NAMING_WARNING)
-                clean.save(paths["raw"], overwrite=True)
-        log = {
-            "subject": subject,
-            "session": session,
-            "source": recording["bids_path"],
-            "config_hash": config_hash(config),
-            "pipeline_version": PIPELINE_VERSION,
-            "versions": {
-                "pdeeg": pdeeg.__version__,
-                "mne": mne.__version__,
-                "mne_icalabel": mne_icalabel.__version__,
-                "numpy": np.__version__,
-            },
-            "figures": {
-                "psd": paths["psd"].name,
-                "ica": paths["ica"].name if removed else None,
-            },
-            **log,
-        }
-        paths["log"].write_text(json.dumps(log, indent=1), encoding="utf-8")
+        clean_recording(raw, recording, config)
         result["status"] = "processed"
     except RecordingTooShort as exc:
         result |= {"status": "too_short", "detail": str(exc)}

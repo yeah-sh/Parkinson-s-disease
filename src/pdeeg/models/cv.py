@@ -7,10 +7,15 @@ and :func:`check_grouped` is asserted on every outer and inner split the evaluat
 from __future__ import annotations
 
 import hashlib
+import warnings
+from collections.abc import Callable
 
 import numpy as np
 import sklearn
+from sklearn.base import clone
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.feature_selection import SelectKBest, f_classif
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import get_scorer
@@ -145,6 +150,54 @@ def weighted_fit(estimator, X: np.ndarray, y: np.ndarray, groups: np.ndarray, we
         return estimator.fit(X, y, groups=groups)
     with sklearn.config_context(enable_metadata_routing=True):
         return estimator.fit(X, y, groups=groups, sample_weight=weights)
+
+
+def counting_warnings(fit: Callable[[], object]) -> int:
+    """Call ``fit``; returns how many of the fits in it did not converge.
+
+    Counted are only the convergence warnings; the rest go on as usual.
+    """
+    n_warnings = 0
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        fit()
+    for caught_warning in caught:
+        if issubclass(caught_warning.category, ConvergenceWarning):
+            n_warnings += 1
+        else:
+            warnings.showwarning(
+                caught_warning.message,
+                caught_warning.category,
+                caught_warning.filename,
+                caught_warning.lineno,
+            )
+    return n_warnings
+
+
+def platt(
+    tuned, config: ModelConfig, X, y, groups, weights, seed: int, method: str = "sigmoid"
+) -> tuple[CalibratedClassifierCV, int]:
+    """The tuned model of :func:`search` with Platt scaling (or ``method``) learnt on these rows,
+    and the number of fits that did not converge.
+
+    The scaling is fitted to the model's predictions on grouped inner folds of the rows, and the
+    model itself is refitted on all of them (``ensemble=False``), so the result is the same
+    model with its probabilities rescaled. scikit-learn does not pass groups on to the splitter
+    here, so the grouped splits are handed over ready-made.
+    """
+    splits = list(inner_splitter(config.cv, seed).split(X, y, groups))
+    calibrated = CalibratedClassifierCV(
+        clone(tuned.best_estimator_), method=method, cv=splits, ensemble=False
+    )
+
+    def fit() -> None:
+        if weights is None:
+            calibrated.fit(X, y)
+            return
+        with sklearn.config_context(enable_metadata_routing=True):
+            calibrated.fit(X, y, sample_weight=weights)
+
+    return calibrated, counting_warnings(fit)
 
 
 def permuted_labels(

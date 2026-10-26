@@ -43,6 +43,8 @@ RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin pdeeg \
     && ln -s data/reports reports \
     && ln -s data/mlruns mlruns \
     && ln -s data/mlflow.db mlflow.db \
+    && ln -s data/models models \
+    && ln -s data/predictions predictions \
     && chown pdeeg:pdeeg /app /app/data
 
 USER pdeeg

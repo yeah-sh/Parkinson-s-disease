@@ -7,22 +7,21 @@ on the pooled out-of-fold predictions.
 
 from __future__ import annotations
 
-import warnings
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
-from sklearn.exceptions import ConvergenceWarning
 from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
 
 from pdeeg.config import Config
 from pdeeg.models.cv import (
     check_grouped,
+    counting_warnings,
     outer_splitter,
     permuted_labels,
+    platt,
     search,
     seed_for,
     weighted_fit,
@@ -40,7 +39,9 @@ class Predictions:
     its predicted label and ``fold`` its outer fold. ``weights`` has one row per outer fold: the
     coefficients of a linear model on standardised features, or a boosting model's impurity
     importances (zero for features a selection left out). ``best_params`` lists what the inner
-    loop chose in each fold.
+    loop chose in each fold. ``probability`` (the model's own, NaN for a model without one)
+    and ``probability_platt`` (Platt-scaled inside each training set) are P(positive), filled
+    only when the run calibrated.
     """
 
     score: np.ndarray
@@ -49,6 +50,8 @@ class Predictions:
     weights: np.ndarray
     best_params: list[dict[str, Any]]
     convergence_warnings: int
+    probability: np.ndarray | None = None
+    probability_platt: np.ndarray | None = None
 
 
 def _weights(pipeline, n_features: int) -> np.ndarray:
@@ -62,28 +65,6 @@ def _weights(pipeline, n_features: int) -> np.ndarray:
     return full
 
 
-def counting_warnings(fit: Callable[[], object]) -> int:
-    """Call ``fit``; returns how many of the fits in it did not converge.
-
-    Counted are only the convergence warnings; the rest go on as usual.
-    """
-    n_warnings = 0
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", ConvergenceWarning)
-        fit()
-    for caught_warning in caught:
-        if issubclass(caught_warning.category, ConvergenceWarning):
-            n_warnings += 1
-        else:
-            warnings.showwarning(
-                caught_warning.message,
-                caught_warning.category,
-                caught_warning.filename,
-                caught_warning.lineno,
-            )
-    return n_warnings
-
-
 def fit_counting_warnings(
     estimator, X: np.ndarray, y: np.ndarray, groups: np.ndarray, weights: np.ndarray | None
 ) -> int:
@@ -92,13 +73,20 @@ def fit_counting_warnings(
 
 
 def nested_cv(
-    data: TaskData, model: str, config: Config, seed: int, y: np.ndarray | None = None
+    data: TaskData,
+    model: str,
+    config: Config,
+    seed: int,
+    y: np.ndarray | None = None,
+    *,
+    calibrate: bool = False,
 ) -> Predictions:
     """Out-of-fold predictions of ``model`` for every row of ``data``.
 
     ``y`` replaces the labels (for a permutation). The outer split is drawn with ``seed``, the
     inner ones with seeds derived from it. The weights of ``data``, if any, go into every fit
-    and every inner-loop score.
+    and every inner-loop score. ``calibrate`` adds out-of-fold probabilities, raw and with
+    Platt scaling learnt on each outer training set; the decisions do not change.
     """
     settings = config.model
     y = data.y if y is None else np.asarray(y)
@@ -107,6 +95,8 @@ def nested_cv(
     predicted = np.full(len(y), -1)
     fold = np.full(len(y), -1)
     weights, best, n_warnings = [], [], 0
+    probability = np.full(len(y), np.nan) if calibrate else None
+    probability_platt = np.full(len(y), np.nan) if calibrate else None
     splits = outer_splitter(settings.cv, seed).split(X, y, groups)
     for k, (train, test) in enumerate(splits):
         check_grouped(train, test, groups)
@@ -119,9 +109,26 @@ def nested_cv(
         fold[test] = k
         weights.append(_weights(tuned.best_estimator_, X.shape[1]))
         best.append(tuned.best_params_)
+        if calibrate:
+            if hasattr(tuned, "predict_proba"):
+                probability[test] = tuned.predict_proba(X[test])[:, 1]
+            scaled, count = platt(
+                tuned, settings, X[train], y[train], groups[train], held, seed_for(seed, "platt", k)
+            )
+            n_warnings += count
+            probability_platt[test] = scaled.predict_proba(X[test])[:, 1]
     if (fold < 0).any():
         raise RuntimeError("the outer loop left rows without a prediction")
-    return Predictions(score, predicted, fold, np.array(weights), best, n_warnings)
+    return Predictions(
+        score,
+        predicted,
+        fold,
+        np.array(weights),
+        best,
+        n_warnings,
+        probability,
+        probability_platt,
+    )
 
 
 def metrics(

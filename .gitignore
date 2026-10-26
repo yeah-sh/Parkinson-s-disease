@@ -34,3 +34,7 @@ dist/
 mlruns/
 mlartifacts/
 mlflow.db
+
+# Final models and predictions (`pdeeg train-final`, `pdeeg predict`)
+/models/
+/predictions/

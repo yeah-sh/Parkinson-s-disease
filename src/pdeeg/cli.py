@@ -30,6 +30,11 @@ STEPS = {
     "cascade": "two stages on one recording: patient or control, then OFF or ON medication",
     "report": "write every report again from what the steps stored",
 }
+# The final models and predictions with them; not part of `pdeeg all`.
+TOOLS = {
+    "train-final": "fit the final models of every stage on all eligible participants (models/)",
+    "predict": "a recording (or a patient's two) through the final models; a research demo",
+}
 PARTS = {
     "psd-features": "band-power features only (part of `features`)",
     "mfdfa-features": "MFDFA features and their QC report only (part of `features`)",
@@ -51,11 +56,19 @@ def _known_errors() -> tuple[type[Exception], ...]:
     from pdeeg.models.data import TaskError
     from pdeeg.models.store import StoreError
     from pdeeg.pipeline import StepFailed
+    from pdeeg.predict.features import FeatureError
+    from pdeeg.predict.final import FinalError
+    from pdeeg.predict.inputs import InputError
+    from pdeeg.predict.predictor import PredictError
     from pdeeg.stats.features import StatsError
 
     return (
         CascadeStoreError,
         DatasetError,
+        FeatureError,
+        FinalError,
+        InputError,
+        PredictError,
         DownloadError,
         StatsError,
         StepFailed,
@@ -86,9 +99,29 @@ def _run(command: str, config: Config, args: argparse.Namespace) -> None:
         "classify": lambda: pipeline.classify_step(config, n_jobs=n_jobs, force=force, say=_say),
         "cascade": lambda: pipeline.cascade_step(config, n_jobs=n_jobs, force=force, say=_say),
         "report": lambda: pipeline.report_step(config, say=_say),
+        "train-final": lambda: pipeline.train_final_step(config, say=_say),
         "all": lambda: pipeline.all_steps(config, force=force, say=_say),
     }
     steps[command]()
+
+
+def _predict(config: Config, args: argparse.Namespace) -> None:
+    import json
+
+    from pdeeg.predict.predictor import predict_files, summary_text
+
+    paths = [args.file] + ([args.paired] if args.paired else [])
+    out_dir = args.out_dir or config.predict.output_dir
+    jobs = config.mfdfa.extraction.n_jobs if args.n_jobs is None else args.n_jobs
+    result = predict_files(config, paths, out_dir=out_dir, n_jobs=jobs, say=_say)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(args.file).stem + ("_paired" if args.paired else "")
+    text = summary_text(result)
+    (out_dir / f"{stem}_prediction.json").write_text(json.dumps(result, indent=1), "utf-8")
+    (out_dir / f"{stem}_prediction.txt").write_text(text + "\n", "utf-8")
+    _say("")
+    _say(text)
+    _say(f"\nJSON -> {out_dir / f'{stem}_prediction.json'}")
 
 
 def _mfdfa_scaling(config: Config, n_jobs: int | None) -> None:
@@ -169,6 +202,22 @@ def build_parser() -> argparse.ArgumentParser:
         part = commands.add_parser(name, help=text)
         _add_force(part)
         _add_n_jobs(part, "processes to use")
+    commands.add_parser("train-final", help=TOOLS["train-final"])
+    predict = commands.add_parser("predict", help=TOOLS["predict"])
+    predict.add_argument("file", type=Path, help="a .bdf or .edf file, or a BIDS EEG file")
+    predict.add_argument(
+        "--paired",
+        type=Path,
+        default=None,
+        help="the same patient's other recording: also say which of the two is OFF",
+    )
+    predict.add_argument(
+        "--out-dir",
+        type=Path,
+        default=None,
+        help="where the JSON, the summary and the work files go (default: predict.output_dir)",
+    )
+    _add_n_jobs(predict, "processes for the MFDFA")
     scaling = commands.add_parser(
         "mfdfa-scaling",
         help="plot the scaling of a few recordings, without their labels, to choose fit ranges",
@@ -195,6 +244,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "mfdfa-scaling":
             _mfdfa_scaling(config, args.n_jobs)
+        elif args.command == "predict":
+            _predict(config, args)
         else:
             _run(args.command, config, args)
     except _known_errors() as exc:

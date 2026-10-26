@@ -22,17 +22,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import sklearn
 from joblib import Parallel, delayed
-from sklearn.base import clone
-from sklearn.calibration import CalibratedClassifierCV
 
 from pdeeg.config import Config
 from pdeeg.models.calibration import calibration_summary, miscalibration, multiclass_brier
-from pdeeg.models.cv import check_grouped, inner_splitter, outer_splitter, search, seed_for
+from pdeeg.models.cv import check_grouped, outer_splitter, platt, search, seed_for
 from pdeeg.models.data import TaskError, participant_weights, task_data, task_rows
 from pdeeg.models.evaluate import (
-    counting_warnings,
     fit_counting_warnings,
     metrics,
     permutation_p,
@@ -137,35 +133,6 @@ class CascadePredictions:
     convergence_warnings: int
 
 
-def _platt(
-    tuned, config: Config, X, y, groups, weights, seed: int
-) -> tuple[CalibratedClassifierCV, int]:
-    """The tuned model with Platt scaling (or the configured method) learnt on training rows,
-    and the number of fits that did not converge.
-
-    The scaling is fitted to the model's predictions on grouped inner folds of these rows, and
-    the model itself is refitted on all of them (``ensemble=False``), so the result is the same
-    model with its probabilities rescaled. scikit-learn does not pass groups on to the splitter
-    here, so the grouped splits are handed over ready-made.
-    """
-    splits = list(inner_splitter(config.model.cv, seed).split(X, y, groups))
-    calibrated = CalibratedClassifierCV(
-        clone(tuned.best_estimator_),
-        method=config.model.cascade.calibration.method,
-        cv=splits,
-        ensemble=False,
-    )
-
-    def fit() -> None:
-        if weights is None:
-            calibrated.fit(X, y)
-            return
-        with sklearn.config_context(enable_metadata_routing=True):
-            calibrated.fit(X, y, sample_weight=weights)
-
-    return calibrated, counting_warnings(fit)
-
-
 def run_cascade(
     data: CascadeData,
     config: Config,
@@ -218,7 +185,16 @@ def run_cascade(
         if calibrate:
             for stage, rows, y, w, tuned in stages:
                 platt_seed = seed_for(seed, stage, "platt", k)
-                scaled, count = _platt(tuned, config, X[rows], y, groups[rows], w, platt_seed)
+                scaled, count = platt(
+                    tuned,
+                    settings,
+                    X[rows],
+                    y,
+                    groups[rows],
+                    w,
+                    platt_seed,
+                    settings.cascade.calibration.method,
+                )
                 n_warnings += count
                 target = p1_platt if stage == "stage 1" else p2_platt
                 target[test] = scaled.predict_proba(X[test])[:, 1]

@@ -46,19 +46,19 @@ def _log_likelihood(y: np.ndarray, eta: np.ndarray, weights: np.ndarray) -> floa
     return float(np.sum(weights * (y * log_expit(eta) + (1 - y) * log_expit(-eta))))
 
 
-def recalibration(
+def logistic_recalibration(
     y: np.ndarray, p: np.ndarray, weights: np.ndarray | None = None
 ) -> tuple[float, float]:
-    """Calibration in the large and calibration slope of probabilities ``p`` for labels ``y``.
+    """Intercept a and slope b of the weighted logistic regression logit P(y) = a + b logit(p).
 
-    The slope is that of the weighted logistic regression of ``y`` on logit(p); calibration in
-    the large is the intercept a of logit P(y) = a + logit(p). Both are maximum likelihood fits;
-    with labels that the probabilities separate perfectly they run large, as they should.
+    A maximum likelihood fit; with labels that the probabilities separate perfectly it runs
+    large, as it should. NaN for labels of one class, and for probabilities that are all the
+    same (the slope is then not defined).
     """
     y = np.asarray(y, dtype=float)
     x = _logit(p)
     w = np.ones_like(y) if weights is None else np.asarray(weights, dtype=float)
-    if len(set(y)) < 2:
+    if len(set(y)) < 2 or np.ptp(x) < 1e-9:
         return np.nan, np.nan
 
     def loss(ab: np.ndarray) -> float:
@@ -69,10 +69,73 @@ def recalibration(
         return -np.array([residual.sum(), (residual * x).sum()])
 
     fit = optimize.minimize(loss, x0=np.array([0.0, 1.0]), jac=gradient, method="BFGS")
+    return float(fit.x[0]), float(fit.x[1])
+
+
+def recalibration(
+    y: np.ndarray, p: np.ndarray, weights: np.ndarray | None = None
+) -> tuple[float, float]:
+    """Calibration in the large and calibration slope of probabilities ``p`` for labels ``y``.
+
+    The slope is that of :func:`logistic_recalibration`; calibration in the large is the
+    intercept a of logit P(y) = a + logit(p), the slope held at 1.
+    """
+    y = np.asarray(y, dtype=float)
+    if len(set(y)) < 2:
+        return np.nan, np.nan
+    x = _logit(p)
+    w = np.ones_like(y) if weights is None else np.asarray(weights, dtype=float)
+    _, slope = logistic_recalibration(y, p, weights)
     large = optimize.minimize_scalar(
         lambda a: -_log_likelihood(y, a + x, w), bounds=(-20.0, 20.0), method="bounded"
     )
-    return float(large.x), float(fit.x[1])
+    return float(large.x), slope
+
+
+def uncertain_band(
+    y: np.ndarray,
+    p: np.ndarray,
+    groups: np.ndarray,
+    weights: np.ndarray | None,
+    n_resamples: int,
+    confidence: float,
+    rng: np.random.Generator,
+    step: float = 0.005,
+    threshold: float = 0.5,
+) -> tuple[float, float]:
+    """The probabilities whose label the out-of-fold evidence does not back.
+
+    Participants are resampled with all their rows, and every resample's
+    :func:`logistic_recalibration` maps a probability p to what it turned out to mean,
+    P(y = 1 | p). A probability p at or above ``threshold`` is labelled positive with backing
+    only when the whole ``confidence`` interval of that lies above ``threshold``, and one below
+    it negative only when the interval lies below. Every other probability is in the band;
+    an interval on the far side of the threshold (the model confidently wrong) counts as no
+    backing. Returns the smallest interval that holds all of them and ``threshold`` itself:
+    [0, 1] for probabilities that say nothing.
+    """
+    y, p, groups = np.asarray(y, dtype=float), np.asarray(p, dtype=float), np.asarray(groups)
+    grid = np.round(np.arange(step, 1.0, step), 10)
+    x = _logit(grid)
+    names = np.unique(groups)
+    rows = {name: np.flatnonzero(groups == name) for name in names}
+    curves = []
+    for _ in range(n_resamples):
+        chosen = np.concatenate([rows[name] for name in rng.choice(names, size=names.size)])
+        w = None if weights is None else weights[chosen]
+        a, b = logistic_recalibration(y[chosen], p[chosen], w)
+        if np.isfinite(a) and np.isfinite(b):
+            curves.append(expit(a + b * x))
+    if not curves:
+        return 0.0, 1.0
+    tail = 100.0 * (1.0 - confidence) / 2.0
+    low, high = np.percentile(np.array(curves), [tail, 100.0 - tail], axis=0)
+    backed = np.where(grid >= threshold, low > threshold, high < threshold)
+    inside = grid[~backed]
+    lower = min(threshold, inside.min()) if inside.size else threshold
+    upper = max(threshold, inside.max()) if inside.size else threshold
+    # A band that reaches the ends of the grid reaches 0 or 1: nothing beyond it is certain.
+    return (0.0 if lower <= grid[0] else float(lower), 1.0 if upper >= grid[-1] else float(upper))
 
 
 def reliability_table(

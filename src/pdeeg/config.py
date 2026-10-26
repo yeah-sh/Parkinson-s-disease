@@ -303,6 +303,17 @@ class CascadeConfig:
     figures_dir: Path
 
 
+# The models `pdeeg train-final` fits and `pdeeg predict` uses, in the order they are applied.
+FINAL_STAGES = ("stage1", "stage2_single", "stage2_paired")
+
+
+@dataclass(frozen=True)
+class FinalStageConfig:
+    task: str
+    feature_set: str
+    model: str
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     random_state: int
@@ -318,6 +329,7 @@ class ModelConfig:
     figures_dir: Path
     n_jobs: int
     cascade: CascadeConfig
+    final: dict[str, FinalStageConfig] | None
 
 
 # --- stats.yaml --------------------------------------------------------------------------------
@@ -372,6 +384,35 @@ class StatsConfig:
     n_jobs: int
 
 
+# --- predict.yaml ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BandConfig:
+    confidence: float
+    n_bootstrap: int
+    step: float
+
+
+@dataclass(frozen=True)
+class StageThresholdConfig:
+    threshold: float
+    uncertain: tuple[float, float] | None
+
+
+@dataclass(frozen=True)
+class PredictConfig:
+    models_dir: Path
+    output_dir: Path
+    sfreq: float
+    amplitude_uv: tuple[float, float]
+    channel_aliases: dict[str, str]
+    band: BandConfig
+    stages: dict[str, StageThresholdConfig]
+    n_top_features: int
+    disclaimer: str
+
+
 # --- everything --------------------------------------------------------------------------------
 
 
@@ -385,6 +426,7 @@ class Config:
     psd: PsdConfig
     model: ModelConfig
     stats: StatsConfig
+    predict: PredictConfig
 
 
 # Section name -> (file relative to the config directory, schema).
@@ -395,6 +437,7 @@ _SECTIONS: dict[str, tuple[str, type]] = {
     "psd": ("features/psd.yaml", PsdConfig),
     "model": ("model.yaml", ModelConfig),
     "stats": ("stats.yaml", StatsConfig),
+    "predict": ("predict.yaml", PredictConfig),
 }
 
 
@@ -560,6 +603,7 @@ def _validate(config: Config) -> None:
         )
     _validate_stats(config)
     _validate_model(config)
+    _validate_predict(config)
 
 
 def _validate_model(config: Config) -> None:
@@ -616,6 +660,64 @@ def _validate_model(config: Config) -> None:
     if not model.channel_k or min(model.channel_k) < 1:
         raise ConfigError("model.channel_k: needs at least one k of 1 or more")
     _validate_cascade(config)
+    _validate_final(config)
+
+
+def _validate_final(config: Config) -> None:
+    """model.final: a configuration for every stage, of the tasks the stages answer."""
+    model = config.model
+    if model.final is None:
+        return
+    if tuple(model.final) != FINAL_STAGES:
+        raise ConfigError(
+            f"model.final: expected the stages {', '.join(FINAL_STAGES)} in this order, "
+            f"got {', '.join(model.final)}"
+        )
+    for stage, chosen in model.final.items():
+        where = f"model.final.{stage}"
+        if chosen.task not in model.tasks:
+            raise ConfigError(f"{where}.task: no task {chosen.task!r} in model.tasks")
+        if chosen.feature_set not in model.feature_sets:
+            raise ConfigError(f"{where}.feature_set: no feature set {chosen.feature_set!r}")
+        if chosen.model not in ("logistic_regression", "linear_svm", "gradient_boosting"):
+            raise ConfigError(f"{where}.model: unknown model {chosen.model!r}")
+    final = model.final
+    if final["stage1"].task != model.cascade.stage1:
+        raise ConfigError("model.final.stage1: must be the task of model.cascade.stage1")
+    if final["stage2_single"].task != model.cascade.stage2:
+        raise ConfigError("model.final.stage2_single: must be the task of model.cascade.stage2")
+    paired, single = model.tasks[final["stage2_paired"].task], model.tasks[model.cascade.stage2]
+    if not paired.paired or (paired.positive, paired.negative) != (
+        single.positive,
+        single.negative,
+    ):
+        raise ConfigError(
+            "model.final.stage2_paired: must be a paired task with the classes of stage 2"
+        )
+
+
+def _validate_predict(config: Config) -> None:
+    """predict.yaml against itself (channel aliases are checked by pdeeg.predict.inputs)."""
+    predict = config.predict
+    if set(predict.stages) != set(FINAL_STAGES):
+        raise ConfigError(f"predict.stages: expected {', '.join(FINAL_STAGES)}")
+    for stage, settings in predict.stages.items():
+        if not 0.0 < settings.threshold < 1.0:
+            raise ConfigError(f"predict.stages.{stage}.threshold: must lie between 0 and 1")
+        if settings.uncertain is not None:
+            low, high = settings.uncertain
+            if not 0.0 <= low <= settings.threshold <= high <= 1.0:
+                raise ConfigError(
+                    f"predict.stages.{stage}.uncertain: need 0 <= low <= threshold <= high <= 1, "
+                    f"got [{low}, {high}]"
+                )
+    low, high = predict.amplitude_uv
+    if not 0.0 < low < high:
+        raise ConfigError("predict.amplitude_uv: need 0 < lower < upper")
+    if not 0.0 < predict.band.confidence < 1.0 or predict.band.n_bootstrap < 1:
+        raise ConfigError("predict.band: confidence in (0, 1) and n_bootstrap of 1 or more")
+    if not 0.0 < predict.band.step < 0.5:
+        raise ConfigError("predict.band.step: must lie between 0 and 0.5")
 
 
 def _validate_cascade(config: Config) -> None:

@@ -233,6 +233,48 @@ class Tracker:
                 mlflow.log_artifact(str(path))
             return run.info.run_id
 
+    def log_final(self, stage: str, info: dict[str, Any], files: list[Path]) -> str:
+        """One run for a final model (``pdeeg train-final``), its files as artifacts."""
+        mlflow = self._mlflow
+        with mlflow.start_run(experiment_id=self.experiment_id, run_name=f"final/{stage}") as run:
+            mlflow.set_tags(
+                self.tags
+                | {
+                    "task": f"final/{stage}",
+                    "feature_set": info["feature_set"],
+                    "model": info["model"],
+                }
+            )
+            low, high = info["thresholds"]["uncertain"]
+            mlflow.log_params(
+                {
+                    "stage_task": info["task"],
+                    "hyperparameters": json.dumps(_plain(info["hyperparameters"])),
+                    "threshold": info["thresholds"]["threshold"],
+                    "uncertain_low": low,
+                    "uncertain_high": high,
+                    "feature_sha256": info["config"]["feature_sha256"],
+                }
+            )
+            selected = info["cross_validated"]["selected"]["balanced_accuracy"]
+            values = {
+                "cv_balanced_accuracy": selected["value"],
+                "cv_balanced_accuracy_ci_low": selected["low"],
+                "cv_balanced_accuracy_ci_high": selected["high"],
+                "cv_balanced_accuracy_p": selected["p"],
+                "convergence_warnings": info["convergence_warnings"],
+                **{
+                    f"oof_{name}": value
+                    for name, value in info["thresholds"]["out_of_fold"].items()
+                },
+            }
+            mlflow.log_metrics(
+                {key: float(value) for key, value in values.items() if np.isfinite(value)}
+            )
+            for path in files:
+                mlflow.log_artifact(str(path))
+            return run.info.run_id
+
     def log_summary(self, files: list[Path], task: str = "summary") -> str:
         """A run holding a report and its figures."""
         mlflow = self._mlflow

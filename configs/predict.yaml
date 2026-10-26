@@ -1,0 +1,58 @@
+# Predictions for one recording (`pdeeg predict`). Added on 2026-10-26.
+#
+# Research demo, not a diagnostic tool: the models were trained on 31 people of one dataset and
+# have not been tested anywhere else.
+
+# Where `pdeeg train-final` writes the models (one directory per stage) and `pdeeg predict` its
+# results. Both are git-ignored.
+models_dir: models
+output_dir: predictions
+
+# --- What an input must be ---------------------------------------------------------------------
+# Every recording of ds002778 was sampled at 512 Hz; anything else is resampled to it, with a
+# warning. The length needed is preprocessing.crop.duration (180 s) from the crop start.
+sfreq: 512.0
+# Median standard deviation of the scalp channels, in microvolts, after a 1-40 Hz band-pass.
+# ds002778 recordings sit near 5 µV; outside this range the units are almost certainly wrong
+# (volts read as microvolts, or the reverse), and the recording is refused.
+amplitude_uv: [0.1, 1000.0]
+# Channel names are matched to the biosemi32 montage ignoring case, an "EEG " prefix and a
+# reference suffix such as "-REF". These older 10-20 names are mapped to their current ones.
+channel_aliases:
+  T3: T7
+  T4: T8
+  T5: P7
+  T6: P8
+
+# --- Thresholds and the uncertain band ----------------------------------------------------------
+# A stage calls the positive class when its Platt-scaled probability is at least `threshold`:
+# 0.5 for every stage, since its classes weigh the same in training (stage 1 weights each
+# participant once; stage 2 has one OFF and one ON recording per patient) and the probabilities
+# are calibrated. A probability inside `uncertain` gets no label.
+#
+# The band is not set by hand. `pdeeg train-final` derives it from the stage's out-of-fold
+# probabilities (pdeeg.models.calibration.uncertain_band): participants are resampled
+# `n_bootstrap` times, and each resample's logistic recalibration maps a probability to what it
+# turned out to mean. A probability keeps its label only when the whole `confidence` interval
+# of that lies on the same side of the threshold as the probability itself; every other
+# probability is in the band. A stage whose probabilities cannot be told from a coin flip gets
+# [0.0, 1.0] and never labels anything. `pdeeg train-final` refuses to save models while the
+# values below differ from what the rule gives, and prints the values to put here.
+band:
+  confidence: 0.95
+  n_bootstrap: 2000
+  step: 0.005        # probabilities tried, from 0.005 to 0.995
+stages:
+  stage1:            # patient or control
+    threshold: 0.5
+    uncertain: null  # set from `pdeeg train-final`
+  stage2_single:     # OFF or ON, one recording
+    threshold: 0.5
+    uncertain: null
+  stage2_paired:     # which of a patient's two recordings is OFF
+    threshold: 0.5
+    uncertain: null
+
+# --- Output ---------------------------------------------------------------------------------------
+n_top_features: 5    # features listed per stage, by the size of their contribution
+disclaimer: "Research demo – not a diagnostic tool"

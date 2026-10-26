@@ -11,6 +11,7 @@ same inputs.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Callable
 from typing import Any
@@ -290,7 +291,7 @@ def _classify_stage(config: Config, task: str) -> Stage:
     data = config.data
     settings = {
         "model": without(
-            config.model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade"
+            config.model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade", "final"
         ),
         "task": config.model.tasks[task],
         "sessions": data.sessions,
@@ -373,7 +374,9 @@ def _cascade_stage(config: Config) -> Stage:
     data, model = config.data, config.model
     cascade = model.cascade
     settings = {
-        "model": without(model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade"),
+        "model": without(
+            model, "n_jobs", "report", "figures_dir", "tracking", "tasks", "cascade", "final"
+        ),
         "stage1": model.tasks[cascade.stage1],
         "stage2": model.tasks[cascade.stage2],
         "cascade": without(cascade, "report", "figures_dir"),
@@ -441,6 +444,35 @@ def _write_cascade_report(config: Config, result, say: Say) -> list:
     files = write_report(config, result, summary)
     say(f"cascade report -> {files[0]}")
     return files
+
+
+def train_final_step(config: Config, *, say: Say = print) -> None:
+    """The final models of every stage on all eligible participants, tracked in MLflow."""
+    from pdeeg.features.tables import table_paths
+    from pdeeg.models.tracking import Tracker
+    from pdeeg.predict.final import train_final
+
+    stale = [
+        f"classify {task}"
+        for task in config.model.tasks
+        if not _classify_stage(config, task).is_current()
+    ]
+    if not _cascade_stage(config).is_current():
+        stale.append("cascade")
+    if stale or not summary_path(config).is_file():
+        raise StepFailed(
+            "the final models need current results of `pdeeg classify` and `pdeeg cascade`"
+            + (f" (not current: {', '.join(stale)})" if stale else "")
+        )
+    recordings = read_recordings(config)
+    tables = _tables(config, "wide")
+    summary = pd.read_parquet(summary_path(config))
+    written = train_final(config, recordings, tables, summary, say=say)
+    inputs = {kind: table_paths(config, kind)["wide"] for kind in ("psd", "mfdfa")}
+    tracker = Tracker(config, inputs)
+    for stage, files in written.items():
+        info = json.loads(files[2].read_text(encoding="utf-8"))
+        say(f"{stage}: MLflow run {tracker.log_final(stage, info, files)}")
 
 
 def report_step(config: Config, *, say: Say = print) -> None:
