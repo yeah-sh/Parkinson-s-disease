@@ -233,14 +233,18 @@ def plan_stage(
     calls = _call(probability, threshold, band)
     weights = np.ones(len(calls)) if data.weights is None else data.weights
     certain = calls >= 0
-    outside = metrics(data.y[certain], probability[certain], calls[certain], weights[certain])
     everywhere = metrics(data.y, probability, (probability >= threshold).astype(int), data.weights)
+    labelled = None  # nothing labelled (a band of [0, 1]), or only one class among the labelled
+    if certain.any():
+        outside = metrics(data.y[certain], probability[certain], calls[certain], weights[certain])
+        if np.isfinite(outside["balanced_accuracy"]):
+            labelled = outside["balanced_accuracy"]
     performance = {
         "balanced_accuracy_at_threshold": everywhere["balanced_accuracy"],
         "share_labelled": float(weights[certain].sum() / weights.sum()),
         "n_labelled": int(certain.sum()),
         "n_recordings": len(calls),
-        "balanced_accuracy_labelled": outside["balanced_accuracy"] if certain.any() else np.nan,
+        "balanced_accuracy_labelled": labelled,
     }
     return StagePlan(stage, task, feature_set, model, seed, data, oof, threshold, band, performance)
 

@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -53,8 +54,13 @@ def test_mfdfa_settings_are_validated(tmp_path, old, new, message):
         ("stage2: off_vs_on_single", "stage2: off_vs_on", "is paired"),
         ("stage1: pd_any_vs_hc", "stage1: pd_vs_hc", "positive side of stage1"),
         ("stage1: pd_any_vs_hc", "stage1: off_vs_on_single", "one group with another"),
-        ("model: logistic_regression", "model: linear_svm", "needs probabilities"),
-        ("feature_set: psd_mfdfa", "feature_set: eeg", "no feature set"),
+        # The cascade's model and feature set (model.final has others, indented further).
+        (
+            "  model: logistic_regression\n  calibration:",
+            "  model: linear_svm\n  calibration:",
+            "needs probabilities",
+        ),
+        ("feature_set: psd_mfdfa\n  model:", "feature_set: eeg\n  model:", "no feature set"),
         ("method: sigmoid", "method: beta", "sigmoid or isotonic"),
         ("n_bins: 5", "n_bins: 1", "at least 2 bins"),
     ],
@@ -108,12 +114,9 @@ def test_stats_settings_are_validated(tmp_path, old, new, message):
     [
         ("confidence: 0.95", "confidence: 1.5", "confidence in"),
         ("amplitude_uv: [0.1, 1000.0]", "amplitude_uv: [1000.0, 0.1]", "0 < lower < upper"),
-        (
-            "uncertain: null  # set from `pdeeg train-final`",
-            "uncertain: [0.6, 0.7]",
-            "low <= threshold <= high",
-        ),
         ("  stage2_paired:     #", "  stage3:     #", "predict.stages"),
+        ("  p_value: q", "  p_value: z", "one of p, q"),
+        ("  alpha: 0.05", "  alpha: 5.0", "better_than_chance.alpha"),
     ],
 )
 def test_predict_settings_are_validated(tmp_path, old, new, message):
@@ -123,6 +126,17 @@ def test_predict_settings_are_validated(tmp_path, old, new, message):
     changed.write_text(text.replace(old, new), encoding="utf-8")
 
     with pytest.raises(ConfigError, match=message):
+        load_config(CONFIG_DIR, overrides={"predict": changed})
+
+
+def test_an_uncertain_band_must_hold_its_threshold(tmp_path):
+    text = (CONFIG_DIR / "predict.yaml").read_text(encoding="utf-8")
+    text, n = re.subn(r"(?m)^(    uncertain: ).*$", r"\g<1>[0.6, 0.7]", text, count=1)
+    assert n == 1  # stage 1's band; its threshold is 0.5
+    changed = tmp_path / "predict.yaml"
+    changed.write_text(text, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="low <= threshold <= high"):
         load_config(CONFIG_DIR, overrides={"predict": changed})
 
 
@@ -145,7 +159,9 @@ FINAL = """final:
 )
 def test_the_final_models_section_is_validated(tmp_path, old, new, message):
     final = FINAL if old is None else FINAL.replace(old, new)
-    text = (CONFIG_DIR / "model.yaml").read_text(encoding="utf-8").replace("final: null", final)
+    text = (CONFIG_DIR / "model.yaml").read_text(encoding="utf-8")
+    text, n = re.subn(r"(?ms)^final:.*\Z", lambda _: final, text)  # the last section
+    assert n == 1
     changed = tmp_path / "model.yaml"
     changed.write_text(text, encoding="utf-8")
 

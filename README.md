@@ -147,8 +147,9 @@ re-run. Preprocessing and the MFDFA surrogates take hours. Each step is also its
 Every step except `report` takes `--force`, and the parallel ones take `--n-jobs N`. The same commands are available as
 `make` targets, and `docker build -t pdeeg .` builds an image that runs `pdeeg all` on a mounted
 `data/` directory. A Streamlit page (`pip install -e .[app]`, then
-`streamlit run app/streamlit_app.py`) shows the MFDFA of a single uploaded recording. It has no
-classifier and makes no prediction.
+`streamlit run app/streamlit_app.py`) checks an uploaded recording, shows what `pdeeg predict`
+gives for it with each stage's cross-validated reliability, and shows the recording's MFDFA. It
+needs the models of `pdeeg train-final`, and it is a research demo, not a diagnostic tool.
 
 Every setting lives in `configs/`, and nothing is hard-coded in the package:
 
@@ -314,7 +315,7 @@ reports an interval or a permutation test.
 ```
 configs/        YAML configuration: every setting and path
 src/pdeeg/      the package: data/, preprocessing/, features/, stats/, models/, viz/, cli.py
-app/            Streamlit research demo (no classifier)
+app/            Streamlit research demo (the predictions of `pdeeg predict`, MFDFA figures)
 tests/          pytest; synthetic data only, except one test marked "dataset"
 notebooks/      MFDFA validation
 reports/        generated reports and figures

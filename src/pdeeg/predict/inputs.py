@@ -3,7 +3,8 @@
 Nothing is computed from a recording before :func:`read_recording` has accepted it. It refuses
 (:class:`InputError`, with the reason) a file it cannot read, EEG channels that do not cover the
 montage, and a recording too short for the crop or with implausible amplitudes. It resamples a
-recording sampled at another rate, with a note.
+recording sampled at another rate, with a note. Every check it makes is kept as a
+:class:`Check`, on the recording or on the error, to show the person who gave the file.
 
 A recording is also fingerprinted, so that a recording the final models were trained on can be
 recognised (:func:`identify_training`): by its BIDS subject and session in the training
@@ -17,6 +18,7 @@ import hashlib
 import json
 import re
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,8 +43,31 @@ _HASH_VOLTS = 1e-8
 _AMPLITUDE_S = 60.0
 
 
+PASSED, NOTE, FAILED = "passed", "note", "failed"
+
+
+@dataclass(frozen=True)
+class Check:
+    """One check of a recording: what was checked, how it came out, and what was found.
+
+    ``status`` is ``passed``, ``note`` (passed, with something to know, such as a resampled
+    recording) or ``failed``.
+    """
+
+    name: str
+    status: str
+    detail: str
+
+
 class InputError(Exception):
-    """The recording cannot be used as it is; the message says why."""
+    """The recording cannot be used as it is; the message says why.
+
+    ``checks`` holds the checks made, the failed one last (empty for an error found elsewhere).
+    """
+
+    def __init__(self, message: str, checks: Sequence[Check] = ()) -> None:
+        super().__init__(message)
+        self.checks = list(checks)
 
 
 @dataclass
@@ -50,9 +75,10 @@ class Recording:
     """A recording that passed the checks.
 
     ``raw`` holds the scalp channels with the montage's names, order and positions, loaded and
-    at the configured sampling rate. ``notes`` says what was changed to get there.
-    ``available_s`` is the length from the crop start. ``bids`` holds ``subject``,
-    ``session``, ``root``, ``bids_path`` and ``doi`` when the file sits in a BIDS dataset.
+    at the configured sampling rate. ``notes`` says what was changed to get there, and
+    ``checks`` what was checked. ``available_s`` is the length from the crop start. ``bids``
+    holds ``subject``, ``session``, ``root``, ``bids_path`` and ``doi`` when the file sits in a
+    BIDS dataset.
     """
 
     path: Path
@@ -63,6 +89,7 @@ class Recording:
     median_amplitude_uv: float
     notes: list[str] = field(default_factory=list)
     bids: dict[str, str] | None = None
+    checks: list[Check] = field(default_factory=list)
 
 
 def signal_digest(raw: mne.io.BaseRaw, montage: str) -> str:
@@ -179,28 +206,42 @@ def median_amplitude_uv(raw: mne.io.BaseRaw, start: int) -> float:
 def read_recording(path: str | Path, config: Config) -> Recording:
     """Read ``path`` and check it, before anything else is done with it."""
     path = Path(path)
+    checks: list[Check] = []
+
+    def refuse(check: str, message: str) -> InputError:
+        return InputError(message, [*checks, Check(check, FAILED, message)])
+
     if not path.is_file():
-        raise InputError(f"{path}: no such file")
+        raise refuse("file", f"{path}: no such file")
     bids = bids_entities(path)
     try:
         raw = _read(path, bids)
-    except InputError:
-        raise
+    except InputError as exc:
+        raise refuse("file", str(exc)) from None
     except Exception as exc:
-        raise InputError(f"{path.name}: cannot be read as EEG ({exc})") from exc
+        raise refuse("file", f"{path.name}: cannot be read as EEG ({exc})") from exc
+    kind = f"{'BIDS ' if bids else ''}{path.suffix.lstrip('.').upper()} file"
+    checks.append(Check("file", PASSED, f"{kind} with {len(raw.ch_names)} channels"))
     notes = []
     montage = config.data.dataset.montage
     layout = mne.channels.make_standard_montage(montage)
     kinds = raw.get_channel_types()
     eeg = [name for name, kind in zip(raw.ch_names, kinds, strict=True) if kind == "eeg"]
-    mapping, ignored = map_channels(eeg, layout.ch_names, config.predict.channel_aliases)
+    try:
+        mapping, ignored = map_channels(eeg, layout.ch_names, config.predict.channel_aliases)
+    except InputError as exc:
+        raise refuse("channels", str(exc)) from None
+    found = f"all {len(layout.ch_names)} channels of the {montage} montage"
     if ignored:
         notes.append(f"ignored EEG channels that are not in the montage: {', '.join(ignored)}")
+        found += "; " + notes[-1]
     renamed = {old: new for old, new in mapping.items() if old != new}
     if renamed:
         notes.append(
             "renamed channels: " + ", ".join(f"{old} -> {new}" for old, new in renamed.items())
         )
+        found += "; " + notes[-1]
+    checks.append(Check("channels", NOTE if renamed else PASSED, found))
     raw.pick(list(mapping))
     raw.rename_channels(renamed)
     raw.reorder_channels(layout.ch_names)
@@ -214,28 +255,39 @@ def read_recording(path: str | Path, config: Config) -> Recording:
             f"resampled from {sfreq:g} Hz to {target:g} Hz: the models were trained on "
             f"{target:g} Hz recordings, and features of a resampled recording can differ"
         )
+        checks.append(Check("sampling rate", NOTE, notes[-1]))
         raw.resample(target, verbose="error")
+    else:
+        checks.append(Check("sampling rate", PASSED, f"{sfreq:g} Hz, as in training"))
 
     crop = config.preprocessing.crop
     start, anchor = crop_window(raw, crop)
     available = (raw.n_times - start) / raw.info["sfreq"]
     if available < crop.duration:
-        raise InputError(
+        raise refuse(
+            "duration",
             f"{path.name}: {available:.1f} s of EEG from the {anchor}; at least "
-            f"{crop.duration:g} s are needed"
+            f"{crop.duration:g} s are needed",
         )
-    amplitude = median_amplitude_uv(raw, start)
-    low, high = config.predict.amplitude_uv
-    if not low <= amplitude <= high:
-        raise InputError(
-            f"{path.name}: the median channel amplitude is {amplitude:.3g} µV (1-40 Hz), "
-            f"outside {low:g}-{high:g} µV; are the units in the file right?"
-        )
+    length = f"{available:.1f} s from the {anchor}; the first {crop.duration:g} s are analysed"
     if anchor == "file start" and crop.start_event is not None:
         notes.append(
             f"no trigger {crop.start_event!r}: the {crop.duration:g} s analysed start at the "
             "beginning of the file"
         )
+        checks.append(Check("duration", NOTE, f"{length}; {notes[-1]}"))
+    else:
+        checks.append(Check("duration", PASSED, length))
+    amplitude = median_amplitude_uv(raw, start)
+    low, high = config.predict.amplitude_uv
+    if not low <= amplitude <= high:
+        raise refuse(
+            "amplitude",
+            f"{path.name}: the median channel amplitude is {amplitude:.3g} µV (1-40 Hz), "
+            f"outside {low:g}-{high:g} µV; are the units in the file right?",
+        )
+    within = f"median {amplitude:.3g} µV (1-40 Hz), within {low:g}-{high:g} µV"
+    checks.append(Check("amplitude", PASSED, within))
     return Recording(
         path=path,
         raw=raw,
@@ -245,6 +297,7 @@ def read_recording(path: str | Path, config: Config) -> Recording:
         median_amplitude_uv=amplitude,
         notes=notes,
         bids=bids,
+        checks=checks,
     )
 
 

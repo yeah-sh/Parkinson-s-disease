@@ -400,6 +400,15 @@ class StageThresholdConfig:
     uncertain: tuple[float, float] | None
 
 
+P_VALUES = ("p", "q")
+
+
+@dataclass(frozen=True)
+class ChanceConfig:
+    alpha: float
+    p_value: str  # one of P_VALUES
+
+
 @dataclass(frozen=True)
 class PredictConfig:
     models_dir: Path
@@ -409,6 +418,7 @@ class PredictConfig:
     channel_aliases: dict[str, str]
     band: BandConfig
     stages: dict[str, StageThresholdConfig]
+    better_than_chance: ChanceConfig
     n_top_features: int
     disclaimer: str
 
@@ -718,6 +728,14 @@ def _validate_predict(config: Config) -> None:
         raise ConfigError("predict.band: confidence in (0, 1) and n_bootstrap of 1 or more")
     if not 0.0 < predict.band.step < 0.5:
         raise ConfigError("predict.band.step: must lie between 0 and 0.5")
+    chance = predict.better_than_chance
+    if not 0.0 < chance.alpha < 1.0:
+        raise ConfigError("predict.better_than_chance.alpha: must lie between 0 and 1")
+    if chance.p_value not in P_VALUES:
+        raise ConfigError(
+            f"predict.better_than_chance.p_value: one of {', '.join(P_VALUES)}, "
+            f"got {chance.p_value!r}"
+        )
 
 
 def _validate_cascade(config: Config) -> None:

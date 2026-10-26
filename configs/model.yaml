@@ -159,4 +159,19 @@ cascade:
 # best combination. Being the best of several on the same cross-validation, its score is
 # optimistic; the models' metadata says so and carries the cascade's pre-specified estimate too.
 # null until the ablation has been run.
-final: null
+#
+# Filled on 2026-10-26 with the block `pdeeg train-final` printed from the classification
+# summary, after `pdeeg classify` (all four tasks) and `pdeeg cascade`.
+final:
+  stage1:
+    task: pd_any_vs_hc
+    feature_set: psd_mfdfa
+    model: linear_svm
+  stage2_single:
+    task: off_vs_on_single
+    feature_set: psd
+    model: logistic_regression
+  stage2_paired:
+    task: off_vs_on
+    feature_set: psd
+    model: logistic_regression

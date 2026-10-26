@@ -130,6 +130,21 @@ def test_another_sampling_rate_is_resampled_with_a_note(tmp_path):
     assert any(note.startswith("resampled from 256 Hz to 512 Hz") for note in recording.notes)
 
 
+def test_every_check_is_kept_to_show_the_person_who_gave_the_file(tmp_path):
+    names = ["file", "channels", "sampling rate", "duration", "amplitude"]
+    slow = read_recording(write_edf(synthetic_raw(sfreq=256.0), tmp_path / "slow.edf"), CONFIG)
+
+    assert [check.name for check in slow.checks] == names
+    assert {c.name: c.status for c in slow.checks}["sampling rate"] == "note"
+    assert {c.status for c in slow.checks} == {"passed", "note"}
+
+    with pytest.raises(InputError) as refused:
+        read_recording(write_edf(synthetic_raw(seconds=100.0), tmp_path / "short.edf"), CONFIG)
+    checks = [(check.name, check.status) for check in refused.value.checks]
+    assert checks == [*((name, "passed") for name in names[:3]), ("duration", "failed")]
+    assert refused.value.checks[-1].detail == str(refused.value)
+
+
 # --- recordings the models were trained on --------------------------------------------------
 
 
@@ -207,6 +222,47 @@ def test_the_band_is_narrow_for_strong_evidence_and_everything_for_none():
     assert band(np.full(x.size, 0.5), y) == (0.0, 1.0)  # one probability for everyone
 
 
+# --- better than chance --------------------------------------------------------------------------
+
+
+def _cross_validated(p, q, low):
+    interval = {"value": 0.7, "low": low, "high": 0.9, "p": p}
+    entry = {
+        "feature_set": "psd",
+        "model": "logistic_regression",
+        "n_participants": 31,
+        "n_recordings": 44,
+        "balanced_accuracy": interval,
+        "balanced_accuracy_q": q,
+    }
+    return {
+        "selected": entry | {"selected_among": 9, "note": "optimistic"},
+        "prespecified": entry | {"note": "fixed"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("p", "q", "low", "rule", "better", "reason"),
+    [
+        (0.001, 0.009, 0.65, "q", True, None),
+        (0.020, 0.176, 0.55, "q", False, "q = 0.176 is not below 0.05"),
+        (0.020, 0.176, 0.55, "p", True, None),
+        (0.001, 0.009, 0.45, "q", False, "reaches chance (0.5)"),
+    ],
+)
+def test_a_stage_is_better_than_chance_only_by_the_configured_test(p, q, low, rule, better, reason):
+    from pdeeg.config import ChanceConfig
+    from pdeeg.predict.predictor import _validation
+
+    entry = _validation(_cross_validated(p, q, low), ChanceConfig(alpha=0.05, p_value=rule))
+
+    assert entry["better_than_chance"] is better and entry["chance"] == 0.5
+    assert (entry["permutation_p"], entry["q"]) == (p, q)
+    if reason:
+        assert any(reason in why for why in entry["not_better_because"])
+    assert ("best of 9" in entry["test"]) == (rule == "q")
+
+
 # --- the final models, end to end ---------------------------------------------------------------
 
 
@@ -219,6 +275,7 @@ def trained(tmp_path_factory):
     model = dataclasses.replace(
         model,
         tasks={t: model.tasks[t] for t in ("off_vs_on", "pd_any_vs_hc", "off_vs_on_single")},
+        final=None,  # set below from this ablation
         feature_sets={"mfdfa": ("mfdfa",)},
         cascade=dataclasses.replace(model.cascade, feature_set="mfdfa"),
     )
@@ -330,6 +387,7 @@ def test_a_training_recording_gets_its_out_of_fold_results(trained, monkeypatch,
     row = oof[(oof["subject"] == "pd3") & (oof["session"] == "off")].iloc[0]
     assert stage1["out_of_fold"] and stage1["probability"] == pytest.approx(row["probability"])
     assert stage1["true_label"] == "PD"
+    assert isinstance(stage1["cross_validated"]["better_than_chance"], bool)
     text = (tmp_path / "out" / "my_recording_prediction.txt").read_text("utf-8")
     assert "Research demo – not a diagnostic tool" in text and "out of fold" in text
 
@@ -346,6 +404,13 @@ def test_two_new_recordings_go_through_every_stage(trained, tmp_path):
     assert result["disclaimer"] == "Research demo – not a diagnostic tool"
     assert result["training_recording"] is False
     assert any(note.startswith("resampled") for note in result["inputs"][1]["notes"])
+    for entry in result["inputs"]:
+        assert Path(entry["cleaned"]).is_file() and Path(entry["cleaning_log"]).is_file()
+        assert [check["name"] for check in entry["checks"]][:3] == [
+            "file",
+            "channels",
+            "sampling rate",
+        ]
     by_stage = {}
     for entry in result["stages"]:
         by_stage.setdefault(entry["stage"], []).append(entry)
@@ -356,6 +421,7 @@ def test_two_new_recordings_go_through_every_stage(trained, tmp_path):
         assert len(one["top_features"]["features"]) == trained.config.predict.n_top_features
         cv = one["cross_validated"]
         assert cv["ci95"][0] <= cv["balanced_accuracy"] <= cv["ci95"][1]
+        assert cv["better_than_chance"] == (cv["q"] < 0.05 and cv["ci95"][0] > cv["chance"])
         assert ("skipped" in two) == (one["label"] != "PD")  # stage 2 only after a sure PD
     paired = by_stage["stage2_paired"][0]
     assert 0 <= paired["probability"] <= 1 and paired["recordings"] == ["first.edf", "second.edf"]
@@ -373,6 +439,131 @@ def test_a_model_trained_with_other_settings_is_refused(trained, tmp_path):
     )
     with pytest.raises(PredictError, match="other preprocessing or feature settings"):
         load_stage(other, "stage1")
+
+
+# --- the app (app/streamlit_app.py) -------------------------------------------------------------
+
+
+APP = Path(__file__).resolve().parents[1] / "app" / "streamlit_app.py"
+
+
+@pytest.fixture
+def open_app(trained, monkeypatch):
+    """Opens the app, with the configuration and final models of ``trained``."""
+    streamlit = pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    monkeypatch.setattr("pdeeg.config.load_config", lambda *_args, **_kwargs: trained.config)
+    streamlit.cache_data.clear()
+    streamlit.cache_resource.clear()
+    yield lambda: AppTest.from_file(str(APP), default_timeout=900).run()
+    streamlit.cache_data.clear()
+    streamlit.cache_resource.clear()
+
+
+def _upload(path: Path) -> tuple[str, bytes, str]:
+    return (path.name, path.read_bytes(), "application/octet-stream")
+
+
+def _spy(monkeypatch) -> list[dict]:
+    """The results of every call of predict_files, which the app is to call for predictions."""
+    from pdeeg.predict import predictor
+
+    results, real = [], predictor.predict_files
+
+    def spy(*args, **kwargs):
+        results.append(real(*args, **kwargs))
+        return results[-1]
+
+    monkeypatch.setattr("pdeeg.predict.predictor.predict_files", spy)
+    return results
+
+
+def test_the_app_checks_an_upload_then_shows_what_predict_gives(
+    open_app, trained, tmp_path, monkeypatch
+):
+    from pdeeg.predict.predictor import trained_on
+
+    results = _spy(monkeypatch)
+    path = write_edf(synthetic_raw(seed=21), tmp_path / "new_recording.edf")
+    app = open_app()
+    people = trained_on(trained.config)["participants"]
+    banner = app.warning[0].value
+    assert "Research demo – not a diagnostic tool." in banner
+    assert f"Trained on {people} people from one dataset (OpenNeuro ds002778)" in banner
+    assert "not validated on other recordings" in banner
+
+    app.file_uploader[0].set_value(_upload(path)).run()
+
+    assert not app.exception and not app.error
+    assert [h.value for h in app.subheader][0] == "Input checks"
+    checks = next(m.value for m in app.markdown if "new\\_recording.edf" in m.value)
+    for check in ("channels", "sampling rate", "duration"):
+        assert f"**{check}**" in checks
+    assert [h.value for h in app.header] == [
+        "Prediction",
+        "Top contributing features",
+        "The recording",
+    ]
+    (result,) = results  # the app predicted through predict_files, once
+    ran = [stage for stage in result["stages"] if "skipped" not in stage]
+    assert [e.label for e in app.expander].count("How reliable is this?") == len(ran)
+    stage1 = result["stages"][0]
+    shown = f"Probability of Parkinson's: **{stage1['probability']:.2f}**."
+    assert any(m.value.startswith(shown) for m in app.markdown)
+    cv = stage1["cross_validated"]
+    metrics = {m.label: m.value for m in app.metric}
+    assert metrics["Balanced accuracy"] == f"{cv['balanced_accuracy']:.2f}"
+    assert metrics["95% CI"] == f"{cv['ci95'][0]:.2f} – {cv['ci95'][1]:.2f}"
+    assert metrics["Chance"] == "0.50"
+    assert metrics["Permutation p"] == f"{cv['permutation_p']:.3f}"
+    greyed = [w for w in app.warning if "not better than chance" in w.value]
+    assert len(greyed) == sum(not stage["cross_validated"]["better_than_chance"] for stage in ran)
+    assert "Stage 2 · OFF vs ON medication" in [h.value for h in app.subheader]
+    assert [h.value for h in app.subheader][-3:] == [
+        "Fluctuation functions",
+        "Singularity spectrum",
+        "Over the scalp",
+    ]
+    assert "not a diagnostic tool" in app.caption[-1].value
+
+
+def test_the_app_stops_before_predicting_a_file_that_fails_a_check(open_app, tmp_path, monkeypatch):
+    results = _spy(monkeypatch)
+    short = write_edf(synthetic_raw(seconds=100.0), tmp_path / "short.edf")
+    app = open_app()
+
+    app.file_uploader[0].set_value(_upload(short)).run()
+
+    assert not app.exception
+    assert "short.edf cannot be used" in app.error[0].value and "at least" in app.error[0].value
+    assert not app.header and not results
+
+    app.toggle[0].set_value(True).run()  # paired mode: two good files, not said to be one patient
+    first = write_edf(synthetic_raw(seed=31), tmp_path / "first.edf")
+    second = write_edf(synthetic_raw(seed=32), tmp_path / "second.edf")
+    app.file_uploader[0].set_value(_upload(first))
+    app.file_uploader[1].set_value(_upload(second)).run()
+
+    assert not app.exception and not app.error
+    assert len([m for m in app.markdown if "**sampling rate**" in m.value]) == 2  # both checked
+    assert any("same patient" in warning.value for warning in app.warning)
+    assert not app.header and not results
+
+
+def test_the_app_shows_a_training_recording_out_of_fold(open_app, trained, monkeypatch):
+    results = _spy(monkeypatch)
+    app = open_app()
+
+    app.file_uploader[0].set_value(_upload(trained.training)).run()
+
+    assert not app.exception and not app.error
+    (result,) = results
+    assert result["training_recording"] is True
+    explanation = next(i.value for i in app.info if "training recording" in i.value)
+    assert "sub-pd3 ses-off" in explanation and "never saw this participant" in explanation
+    assert any("Out of fold (fold" in m.value for m in app.markdown)
+    assert any("Out-of-fold results come from models" in c.value for c in app.caption)
 
 
 # --- the same features as training, on a ds002778 recording -------------------------------------

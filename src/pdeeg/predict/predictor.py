@@ -11,15 +11,17 @@
    recording, P(OFF), only when stage 1 calls a patient outside its uncertain band; with two
    recordings of one patient, the paired model, which of them is OFF.
 
-The result is a JSON-ready dict (:func:`predict_files`) and a readable summary
-(:func:`summary_text`). Research demo, not a diagnostic tool.
+Every stage's result carries how the stage did in cross-validation and whether that was better
+than chance (``predict.better_than_chance``). The result is a JSON-ready dict
+(:func:`predict_files`) and a readable summary (:func:`summary_text`). Research demo, not a
+diagnostic tool.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +31,8 @@ import pandas as pd
 import sklearn
 from sklearn.pipeline import Pipeline
 
-from pdeeg.config import Config
-from pdeeg.predict.features import feature_digest, feature_vector, recording_tables
+from pdeeg.config import ChanceConfig, Config
+from pdeeg.predict.features import feature_digest, feature_vector, recording_tables, work_files
 from pdeeg.predict.final import REGISTRY, STAGE_TITLES
 from pdeeg.predict.inputs import InputError, Recording, identify_training, read_recording
 
@@ -41,6 +43,8 @@ LABELS = {
     "stage2_paired": {1: "first recording is OFF", 0: "second recording is OFF"},
 }
 UNCERTAIN = "uncertain"
+# Balanced accuracy of guessing, for every stage: each has two classes.
+CHANCE = 0.5
 _MATCH_KEYS = ("subject", "session", "matched_by")
 
 
@@ -145,14 +149,40 @@ def contributions(model: StageModel, x: np.ndarray, n: int) -> dict[str, Any]:
     }
 
 
-def _validation(model: StageModel) -> dict[str, Any]:
-    """What the stage's cross-validation said, for the output."""
-    cv = model.metadata["cross_validated"]
+def _validation(cv: Mapping[str, Any], rule: ChanceConfig) -> dict[str, Any]:
+    """What the stage's cross-validation said (``cross_validated`` of its metadata), and
+    whether that was better than chance by ``rule``, for the output."""
     selected = cv["selected"]["balanced_accuracy"]
+    q = cv["selected"]["balanced_accuracy_q"]
+    tested = {"p": selected["p"], "q": q}[rule.p_value]
+    reasons = []
+    if not tested < rule.alpha:
+        reasons.append(f"{rule.p_value} = {tested:.3g} is not below {rule.alpha:g}")
+    if not selected["low"] > CHANCE:
+        reasons.append(
+            f"the 95 % interval [{selected['low']:.2f}, {selected['high']:.2f}] reaches "
+            f"chance ({CHANCE:g})"
+        )
     entry = {
         "balanced_accuracy": selected["value"],
         "ci95": [selected["low"], selected["high"]],
+        "chance": CHANCE,
         "permutation_p": selected["p"],
+        "q": q,
+        "better_than_chance": not reasons,
+        "test": (
+            f"{rule.p_value} below {rule.alpha:g} and the whole 95 % interval above chance "
+            f"({CHANCE:g})"
+            + (
+                f"; q is p adjusted (Benjamini-Hochberg) for picking the best of "
+                f"{cv['selected']['selected_among']} combinations"
+                if rule.p_value == "q"
+                else ""
+            )
+        ),
+        "not_better_because": reasons,
+        "n_participants": cv["selected"]["n_participants"],
+        "n_recordings": cv["selected"]["n_recordings"],
         "note": cv["selected"]["note"],
         "prespecified_configuration": {
             "feature_set": cv["prespecified"]["feature_set"],
@@ -175,7 +205,7 @@ def _validation(model: StageModel) -> dict[str, Any]:
 
 
 def stage_result(
-    model: StageModel, probability: float, x: np.ndarray | None, n_top: int
+    model: StageModel, probability: float, x: np.ndarray | None, n_top: int, rule: ChanceConfig
 ) -> dict[str, Any]:
     label, uncertain = call(probability, model.threshold, model.band)
     result = {
@@ -190,7 +220,7 @@ def stage_result(
         "uncertain": uncertain,
         "threshold": model.threshold,
         "uncertain_band": list(model.band),
-        "cross_validated": _validation(model),
+        "cross_validated": _validation(model.metadata["cross_validated"], rule),
     }
     if x is not None:
         result["top_features"] = contributions(model, x, n_top)
@@ -224,10 +254,25 @@ def _metadata(config: Config, stage: str) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def trained_on(config: Config) -> dict[str, Any] | None:
+    """The people and dataset stage 1 was trained on (every later stage uses some of them),
+    or None while there is no model."""
+    if not (config.predict.models_dir / "stage1" / "metadata.json").is_file():
+        return None
+    info = _metadata(config, "stage1")
+    training = info["model_card"]["training_data"]
+    return {
+        "participants": training["participants"],
+        "recordings": training["recordings"],
+        "dataset": info["dataset"],
+    }
+
+
 def training_result(
     config: Config, matches: Sequence[dict[str, Any]], paired: bool
 ) -> dict[str, Any]:
     """The stored out-of-fold predictions of training recordings, stage by stage."""
+    rule = config.predict.better_than_chance
     stages = []
     for match in matches:
         subject, session = match["subject"], match["session"]
@@ -245,7 +290,8 @@ def training_result(
                     | {"recording": f"sub-{subject} ses-{session}"}
                 )
                 continue
-            stages.append(_oof_entry(stage, info, row.iloc[0], f"sub-{subject} ses-{session}"))
+            what = f"sub-{subject} ses-{session}"
+            stages.append(_oof_entry(stage, info, row.iloc[0], what, rule))
     if paired:
         same = {m["subject"] for m in matches}
         info = _metadata(config, "stage2_paired")
@@ -261,11 +307,13 @@ def training_result(
                 )
             )
         else:
-            stages.append(_oof_entry("stage2_paired", info, row.iloc[0], "the pair"))
+            stages.append(_oof_entry("stage2_paired", info, row.iloc[0], "the pair", rule))
     return {"training_recording": True, "explanation": EXPLANATION, "stages": stages}
 
 
-def _oof_entry(stage: str, info: dict, row: pd.Series, what: str) -> dict[str, Any]:
+def _oof_entry(
+    stage: str, info: dict, row: pd.Series, what: str, rule: ChanceConfig
+) -> dict[str, Any]:
     thresholds = info["thresholds"]
     probability = float(row["probability"])
     label, uncertain = call(probability, thresholds["threshold"], tuple(thresholds["uncertain"]))
@@ -282,10 +330,26 @@ def _oof_entry(stage: str, info: dict, row: pd.Series, what: str) -> dict[str, A
         "true_label": truth,
         "threshold": thresholds["threshold"],
         "uncertain_band": thresholds["uncertain"],
+        "cross_validated": _validation(info["cross_validated"], rule),
     }
 
 
 # --- new recordings ------------------------------------------------------------------------------
+
+
+def check_pair(recordings: Sequence[Recording]) -> None:
+    """Refuse two inputs with one signal: a pair is a patient's two sessions."""
+    if len(recordings) == 2 and recordings[0].signal_sha256 == recordings[1].signal_sha256:
+        raise InputError("the two recordings have the same signal; --paired needs two sessions")
+
+
+def check_inputs(config: Config, paths: Sequence[str | Path]) -> list[Recording]:
+    """Every input read and checked (:func:`read_recording`), and two inputs as a pair."""
+    if len(paths) not in (1, 2):
+        raise InputError("give one recording, or two of the same patient")
+    recordings = [read_recording(path, config) for path in paths]
+    check_pair(recordings)
+    return recordings
 
 
 def predict_files(
@@ -301,12 +365,8 @@ def predict_files(
     ``paths`` is one recording, or two recordings of one patient (``--paired``). Work files
     (the cleaned data, its QC figures, the MFDFA runs) go under ``out_dir``.
     """
-    if len(paths) not in (1, 2):
-        raise InputError("give one recording, or two of the same patient")
-    recordings = [read_recording(path, config) for path in paths]
+    recordings = check_inputs(config, paths)
     paired = len(recordings) == 2
-    if paired and recordings[0].signal_sha256 == recordings[1].signal_sha256:
-        raise InputError("the two recordings have the same signal; --paired needs two sessions")
     result: dict[str, Any] = {
         "disclaimer": config.predict.disclaimer,
         "inputs": [_input_entry(r) for r in recordings],
@@ -331,18 +391,16 @@ def predict_files(
     stages = ["stage1", "stage2_single"] + (["stage2_paired"] if paired else [])
     models = {stage: load_stage(config, stage) for stage in stages}
     out_dir = Path(out_dir or config.predict.output_dir)
-    n_top = config.predict.n_top_features
+    n_top, rule = config.predict.n_top_features, config.predict.better_than_chance
     vectors = []
     for index, recording in enumerate(recordings):
         say(f"features of {recording.path.name} (cleaning, MFDFA, band power)")
+        folder, name = out_dir / f"{recording.path.stem}_work", f"input{index + 1}"
         tables = recording_tables(
-            recording.raw,
-            config,
-            out_dir / f"{recording.path.stem}_work",
-            name=f"input{index + 1}",
-            source=str(recording.path),
-            n_jobs=n_jobs,
+            recording.raw, config, folder, name=name, source=str(recording.path), n_jobs=n_jobs
         )
+        files = work_files(config, folder, name)
+        result["inputs"][index] |= {"cleaned": str(files["raw"]), "cleaning_log": str(files["log"])}
         vectors.append(
             {
                 stage: feature_vector(
@@ -356,13 +414,13 @@ def predict_files(
         name = recordings[index].path.name
         first = models["stage1"]
         p1 = float(first.pipeline.predict_proba(vector["stage1"].reshape(1, -1))[0, 1])
-        entry = stage_result(first, p1, vector["stage1"], n_top) | {"recording": name}
+        entry = stage_result(first, p1, vector["stage1"], n_top, rule) | {"recording": name}
         outputs.append(entry)
         if entry["label"] == LABELS["stage1"][1]:
             second = models["stage2_single"]
             x = vector["stage2_single"]
             p2 = float(second.pipeline.predict_proba(x.reshape(1, -1))[0, 1])
-            outputs.append(stage_result(second, p2, x, n_top) | {"recording": name})
+            outputs.append(stage_result(second, p2, x, n_top, rule) | {"recording": name})
         else:
             outputs.append(
                 _skipped(
@@ -377,7 +435,7 @@ def predict_files(
         centred = pair - pair.mean(axis=0)
         p = model.pipeline.predict_proba(centred)[:, 1]
         p_first = float(p[0] / p.sum())
-        entry = stage_result(model, p_first, centred[0], n_top) | {
+        entry = stage_result(model, p_first, centred[0], n_top, rule) | {
             "recordings": [r.path.name for r in recordings]
         }
         called = [o for o in outputs if o["stage"] == "stage1"]
@@ -398,6 +456,7 @@ def _input_entry(recording: Recording) -> dict[str, Any]:
         "seconds_from_crop_start": round(recording.available_s, 1),
         "median_amplitude_uv": round(recording.median_amplitude_uv, 3),
         "notes": recording.notes,
+        "checks": [asdict(check) for check in recording.checks],
     }
 
 
@@ -414,8 +473,8 @@ def summary_text(result: dict[str, Any]) -> str:
     lines = [f"pdeeg predict - {result['disclaimer']}", ""]
     for entry in result["inputs"]:
         lines.append(f"Input: {entry['path']}")
-        for note in entry["notes"]:
-            lines.append(f"  note: {note}")
+        for check in entry["checks"]:
+            lines.append(f"  {check['name']}: {check['status']} ({check['detail']})")
         if entry.get("training_recording"):
             match = entry["training_recording"]
             lines.append(
@@ -437,16 +496,28 @@ def summary_text(result: dict[str, Any]) -> str:
             f"{stage['threshold']:g}; uncertain from {low:g} to {high:g})"
         )
         if stage.get("out_of_fold"):
-            lines += [f"  out of fold (fold {stage['fold']}); true label {stage['true_label']}", ""]
-            continue
+            lines.append(f"  out of fold (fold {stage['fold']}); true label {stage['true_label']}")
         cv = stage["cross_validated"]
-        lines.append(f"  cross-validated balanced accuracy {_ci(cv)}: {cv['note']}")
+        lines.append(
+            f"  cross-validated balanced accuracy {_ci(cv)}, chance {cv['chance']:g}, "
+            f"permutation p = {cv['permutation_p']:.3g} (q = {cv['q']:.3g}): {cv['note']}"
+        )
+        if cv["better_than_chance"]:
+            lines.append(f"  better than chance: {cv['test']}")
+        else:
+            lines.append(
+                "  NOT BETTER THAN CHANCE: " + "; ".join(cv["not_better_because"]) + "; "
+                f"the test is {cv['test']}"
+            )
         pre = cv["prespecified_configuration"]
         lines.append(
             f"  configuration fixed in advance ({pre['model']}, {pre['feature_set']}): {_ci(pre)}"
         )
         if "in_cascade" in cv:
             lines.append(f"  inside the cascade: {_ci(cv['in_cascade'])}")
+        if "top_features" not in stage:
+            lines.append("")
+            continue
         top = stage["top_features"]
         lines.append(f"  top features ({top['kind']}):")
         for feature in top["features"]:

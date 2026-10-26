@@ -38,6 +38,11 @@ channel_aliases:
 # probability is in the band. A stage whose probabilities cannot be told from a coin flip gets
 # [0.0, 1.0] and never labels anything. `pdeeg train-final` refuses to save models while the
 # values below differ from what the rule gives, and prints the values to put here.
+#
+# The bands below were set on 2026-10-26 from what `pdeeg train-final` printed for the models of
+# configs/model.yaml `final`. Stage 2 on one recording got [0, 1]: it never labels a recording.
+# The paired stage got [0.5, 0.5]: its two probabilities of a pair always sum to 1, so the
+# recalibration is symmetric about 0.5 and the rule asks only whether its slope is positive.
 band:
   confidence: 0.95
   n_bootstrap: 2000
@@ -45,13 +50,32 @@ band:
 stages:
   stage1:            # patient or control
     threshold: 0.5
-    uncertain: null  # set from `pdeeg train-final`
+    uncertain: [0.305, 0.68]
   stage2_single:     # OFF or ON, one recording
     threshold: 0.5
-    uncertain: null
+    uncertain: [0.0, 1.0]
   stage2_paired:     # which of a patient's two recordings is OFF
     threshold: 0.5
-    uncertain: null
+    uncertain: [0.5, 0.5]
+
+# --- Better than chance -------------------------------------------------------------------------
+# Each stage's output (and the app) says whether the stage's model was better than chance in
+# cross-validation, and the app greys out one that was not. Better than chance means the test
+# reports/cascade_results.md applies: the permutation p of the balanced accuracy below `alpha`
+# and the whole 95 % interval above chance (0.5).
+#
+# The final model of a stage is the configuration with the best balanced accuracy of the
+# ablation, picked on the same out-of-fold predictions it is scored on, so its own p is too
+# small. With `p_value: q` the test takes the Benjamini-Hochberg q over the task's
+# combinations instead (the q column of reports/classification_results.md); the raw p is shown
+# next to it either way. `p_value: p` would take the raw p.
+#
+# Fixed on 2026-10-26 after the ablation of the pre-registered tasks (pd_vs_hc, off_vs_on) had
+# been run and its p and q seen, so after the q of the paired stage 2 (off_vs_on) was known;
+# before any result of the single-recording stages (pd_any_vs_hc, off_vs_on_single).
+better_than_chance:
+  alpha: 0.05
+  p_value: q
 
 # --- Output ---------------------------------------------------------------------------------------
 n_top_features: 5    # features listed per stage, by the size of their contribution

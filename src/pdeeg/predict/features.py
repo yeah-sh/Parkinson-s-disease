@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import mne
 import numpy as np
@@ -28,9 +29,12 @@ from pdeeg.features.extract import extract_recording
 from pdeeg.features.psd import build_psd_table
 from pdeeg.features.tables import build_mfdfa_table, mfdfa_wide, psd_wide
 from pdeeg.models.data import CONFOUNDS, wide_features
-from pdeeg.preprocessing.pipeline import RecordingTooShort, clean_recording
+from pdeeg.preprocessing.pipeline import RecordingTooShort, clean_recording, output_paths
 from pdeeg.preprocessing.pipeline import config_hash as cleaning_hash
 from pdeeg.stages import settings_digest, without
+
+# The session an input is filed under in its working directory.
+SESSION = "predict"
 
 
 class FeatureError(Exception):
@@ -83,6 +87,30 @@ def workspace_config(config: Config, folder: Path) -> Config:
     )
 
 
+def _entry(name: str, source: str) -> dict[str, str]:
+    return {"subject": name, "session": SESSION, "group": "unknown", "bids_path": source}
+
+
+def work_files(config: Config, folder: Path, name: str = "input") -> dict[str, Path]:
+    """Where :func:`clean_input` puts an input's cleaned data (``raw``, a FIF file), its log
+    (``log``) and its QC figures (``psd``, ``ica``)."""
+    return output_paths(workspace_config(config, Path(folder)), name, SESSION)
+
+
+def clean_input(
+    raw: mne.io.BaseRaw, config: Config, folder: Path, *, name: str = "input", source: str = ""
+) -> dict[str, Any]:
+    """Clean one recording as training did, writing under ``folder`` (:func:`work_files`);
+    returns the cleaning log.
+
+    ``raw`` is scalp EEG with the montage, as :func:`pdeeg.data.bids.load_raw` gives it.
+    """
+    try:
+        return clean_recording(raw, _entry(name, source), workspace_config(config, Path(folder)))
+    except RecordingTooShort as exc:
+        raise FeatureError(f"too short to clean: {exc}") from exc
+
+
 def recording_tables(
     raw: mne.io.BaseRaw,
     config: Config,
@@ -94,15 +122,12 @@ def recording_tables(
 ) -> dict[str, pd.DataFrame]:
     """The wide band-power and MFDFA tables of one recording, one row per ``segments``.
 
-    ``raw`` is scalp EEG with the montage, as :func:`pdeeg.data.bids.load_raw` gives it. The
-    cleaned data, its log and QC figures, and the MFDFA runs are written under ``folder``.
+    ``raw`` is as for :func:`clean_input`. The cleaned data, its log and QC figures
+    (:func:`work_files`), and the MFDFA runs are written under ``folder``.
     """
+    clean_input(raw, config, folder, name=name, source=source)
     work = workspace_config(config, Path(folder))
-    recording = {"subject": name, "session": "predict", "group": "unknown", "bids_path": source}
-    try:
-        clean_recording(raw, recording, work)
-    except RecordingTooShort as exc:
-        raise FeatureError(f"too short to clean: {exc}") from exc
+    recording = _entry(name, source)
     status = extract_recording(recording, work, n_jobs=n_jobs, force=True)
     if status["status"] != "processed":
         raise FeatureError(f"MFDFA failed: {status['detail']}")

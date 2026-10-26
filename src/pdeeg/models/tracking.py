@@ -269,7 +269,11 @@ class Tracker:
                 },
             }
             mlflow.log_metrics(
-                {key: float(value) for key, value in values.items() if np.isfinite(value)}
+                {
+                    key: float(value)
+                    for key, value in values.items()
+                    if value is not None and np.isfinite(value)
+                }
             )
             for path in files:
                 mlflow.log_artifact(str(path))

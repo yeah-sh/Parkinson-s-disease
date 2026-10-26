@@ -1,4 +1,7 @@
-"""The research demo: reads one file, describes it, and never predicts anything."""
+"""The research demo's description of a recording, and the app without trained models.
+
+The app's predictions are tested in test_predict.py, with the final models trained there.
+"""
 
 import dataclasses
 import shutil
@@ -10,7 +13,9 @@ import pytest
 
 from pdeeg import demo
 from pdeeg.config import CONFIG_DIR_ENV, load_config
-from test_preprocessing import DURATION, LINE_FREQ, MONTAGE, SFREQ, TRIGGER_AT, synthetic_raw
+from pdeeg.predict.features import clean_input, work_files
+from pdeeg.predict.inputs import read_recording
+from test_preprocessing import DURATION, MONTAGE, SFREQ, synthetic_raw
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "app" / "streamlit_app.py"
@@ -50,45 +55,15 @@ def recording(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="module")
-def analysed(recording):
+def analysed(recording, tmp_path_factory):
+    """The recording read, checked and cleaned as `pdeeg predict` does, then described."""
     config = short_config()
-    raw = demo.read_eeg(recording, MONTAGE)
+    folder = tmp_path_factory.mktemp("clean")
+    raw = read_recording(recording, config).raw
     with mne.use_log_level("ERROR"):
-        cleaned, log = demo.clean(raw, config, LINE_FREQ)
+        log = clean_input(raw, config, folder)
+    cleaned = mne.io.read_raw_fif(work_files(config, folder)["raw"], preload=True, verbose="error")
     return config, demo.series(cleaned, config), log
-
-
-def test_the_file_is_read_as_the_montage_channels_with_its_trigger(recording, tmp_path):
-    copy = tmp_path / "copy.bdf"
-    copy.write_bytes(recording.read_bytes())
-    raw = demo.read_eeg(copy, MONTAGE)
-    copy.unlink()  # as an upload's temporary file is removed
-
-    raw.copy().crop(1.0, 2.0)  # needs no file
-
-    assert raw.ch_names == CHANNELS  # EXG1 has no position and is dropped
-    assert raw.get_montage() is not None
-    descriptions = list(raw.annotations.description)
-    assert "1" in descriptions
-    assert raw.annotations.onset[descriptions.index("1")] == pytest.approx(TRIGGER_AT, abs=0.01)
-
-
-def test_files_the_demo_cannot_use_are_refused_with_a_reason(recording, tmp_path):
-    text = tmp_path / "notes.txt"
-    text.write_text("x", encoding="utf-8")
-    with pytest.raises(demo.DemoError, match=r"expected a \.bdf or \.edf"):
-        demo.read_eeg(text, MONTAGE)
-
-    raw = mne.io.read_raw_bdf(recording, preload=True, verbose="error")
-    raw.rename_channels({"Oz": "E99"})
-    renamed = tmp_path / "renamed.bdf"
-    mne.export.export_raw(renamed, raw, fmt="bdf", verbose="error")
-    with pytest.raises(demo.DemoError, match="no channel named Oz"):
-        demo.read_eeg(renamed, MONTAGE)
-
-    config = load_config(ROOT / "configs")  # 180 s crop: the 44 s recording is too short
-    with pytest.raises(demo.DemoError, match="too short"):
-        demo.clean(demo.read_eeg(recording, MONTAGE), config, LINE_FREQ)
 
 
 def test_the_cleaned_recording_is_described_as_the_pipeline_would(analysed):
@@ -116,8 +91,10 @@ def test_the_app_starts_with_the_disclaimer():
     app = AppTest.from_file(str(APP), default_timeout=120).run()
 
     assert not app.exception
-    assert "Research demo — not a diagnostic tool." in app.warning[0].value
-    assert "Parkinson's disease" in app.warning[0].value
+    banner = app.warning[0].value
+    assert banner.startswith("**Research demo – not a diagnostic tool.**")
+    assert "(OpenNeuro ds002778)" in banner and "not validated on other recordings" in banner
+    assert app.sidebar.warning[0].value == banner
 
 
 def short_config_dir(root: Path) -> Path:
@@ -146,8 +123,12 @@ def test_the_app_describes_an_uploaded_recording(recording, tmp_path, monkeypatc
     upload = ("recording.bdf", recording.read_bytes(), "application/octet-stream")
     app.file_uploader[0].set_value(upload).run()
 
-    assert not app.exception and not app.error
+    assert not app.exception
+    assert "No models have been trained here yet" in app.warning[0].value
+    assert len(app.error) == 1 and "run `pdeeg train-final` first" in app.error[0].value
+    assert [header.value for header in app.header] == ["The recording"]
     assert [header.value for header in app.subheader] == [
+        "Input checks",
         "Cleaning",
         "Fluctuation functions",
         "Singularity spectrum",
@@ -159,12 +140,15 @@ def test_the_app_describes_an_uploaded_recording(recording, tmp_path, monkeypatc
     streamlit.cache_resource.clear()
 
 
-def test_the_demo_has_no_classifier_and_predicts_nothing():
+def test_the_app_predicts_only_through_pdeeg_predict():
+    """No model code of the app's own: its predictions are those of `pdeeg predict`."""
     for path in (
         APP,
         ROOT / "src" / "pdeeg" / "demo.py",
         ROOT / "src" / "pdeeg" / "viz" / "demo.py",
+        ROOT / "src" / "pdeeg" / "viz" / "predict.py",
     ):
         text = path.read_text(encoding="utf-8")
-        assert "pdeeg.models" not in text and "sklearn" not in text, path
-        assert "predict" not in text.lower(), path
+        for code in ("pdeeg.models", "sklearn", "joblib", "predict_proba", "load_stage"):
+            assert code not in text, (path, code)
+    assert "predict_files(" in APP.read_text(encoding="utf-8")

@@ -90,5 +90,5 @@ docker-train-final:
 docker-predict: check-file
 	docker run --rm -v "$(CURDIR)/data:/app/data" $(IMAGE) predict $(PREDICT_ARGS)
 
-app:
-	$(PYTHON) -m streamlit run app/streamlit_app.py
+app:  # uploads stay on this machine: the page is served on localhost only
+	$(PYTHON) -m streamlit run app/streamlit_app.py --server.address localhost
