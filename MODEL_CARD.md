@@ -31,10 +31,8 @@ from `configs/`. Each saved model also carries its own model card, in its `metad
 - **Software.** `pdeeg` 0.1.0, scikit-learn 1.9.1 (pinned in `pyproject.toml`). A model refuses
   to load under another scikit-learn version, or with feature settings other than those it was
   trained with.
-- **Origin.** This repository re-engineers
-  [`Sankhadip-007/Detecttion-of-Parkinson-s-Disease-using-machine-learning-and-deep-learning`](https://github.com/Sankhadip-007/Detecttion-of-Parkinson-s-Disease-using-machine-learning-and-deep-learning)
-  by Sankhadip Bera; see the [README](README.md#credit). This repository has no licence file. The
-  data are CC0.
+- **Licence.** This repository has no licence file. The data are CC0. Acknowledgements are in the
+  [README](README.md#acknowledgements-and-references).
 
 ## Intended use
 
@@ -185,8 +183,9 @@ q = 0.471; [`reports/stats_results.md`](reports/stats_results.md)).
 - **Misleading people.** The dataset's curators "strongly advise against using any such approach
   because it would mislead patients and people who are interested in knowing if they have
   Parkinson's disease". A probability from this tool says nothing reliable about a person. Every
-  output carries the disclaimer, shows the stage's cross-validated performance next to it, and
-  greys out stages that are not better than chance.
+  output carries the disclaimer and shows the stage's cross-validated performance next to it. The
+  app says in words when a stage is not better than chance, and its research view greys that
+  stage out.
 - **Health data.** EEG is health data. The app is served on the local machine only, and handles
   uploads in a temporary directory that is deleted afterwards; the cleaned data stay in memory
   while the app runs. `pdeeg predict` writes the cleaned data and work files under its output
