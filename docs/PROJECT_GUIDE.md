@@ -1415,8 +1415,8 @@ from pdeeg.features.mfdfa import mfdfa
 
 x = np.array([3, 5, 4, 6, 7, 5, 6, 8, 7, 9], float)
 result = mfdfa(x, scales=[3, 4, 5], qs=[-2, 2], order=1)
-result.Fq[1]   # F(s) for q = 2:  0.3727, 0.5244, 0.7416
-result.h       # slopes for q = -2 and q = 2:  1.7456, 1.3395
+result.Fq[1]  # F(s) for q = 2:  0.3727, 0.5244, 0.7416
+result.h  # slopes for q = -2 and q = 2:  1.7456, 1.3395
 ```
 
 The **scales** are the window lengths in samples. The `qs` are explained next.
