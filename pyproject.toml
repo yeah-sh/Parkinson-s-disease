@@ -39,6 +39,7 @@ dev = [
 # The research demo in app/ (`make app`); not needed for the pipeline or the tests.
 app = [
     "streamlit==1.65.0",
+    "edfio==0.4.18",  # writes the app's made-up sample recording as EDF (mne.export)
 ]
 
 [project.scripts]

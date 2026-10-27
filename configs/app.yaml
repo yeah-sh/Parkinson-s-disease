@@ -1,0 +1,43 @@
+# The single-page app (app/streamlit_app.py), read by app/restwave/settings.py; pdeeg itself never
+# reads this file. Display settings only: nothing here changes a feature, a model, a threshold or
+# what the models are given.
+#
+# Fixed on 2026-10-27 from the electrode layout and configs/stats.yaml alone, before any group
+# value of the training tables had been computed for the page.
+
+# "Your brain signal": one channel per scalp region of configs/data.yaml, the midline one where
+# the region has one (the temporal row has none: T7), front to back.
+signal:
+  channels: [Fz, Cz, T7, Pz, Oz]
+  seconds: 6.0           # the first stretch this long with no window marked bad
+
+# The group ranges drawn behind this recording's values. Every person counts once: a patient's
+# OFF and ON recordings are averaged first, as stage 1 weighs each participant once. A range is
+# the group mean +/- `sd` standard deviations over people. Band power and the spectrum leave out
+# the windows marked bad, for the groups and for this recording alike (configs/stats.yaml
+# `segments`).
+groups:
+  sd: 1.0
+
+# "Signal complexity": the singularity spectrum f(alpha) of this series and fit range, the mean of
+# all channels, as configs/stats.yaml `curves` draws it for the groups. `series` is broadband or a
+# band of mfdfa.envelope.bands.
+#
+# First set to broadband / long; changed on 2026-10-27 to the beta envelope, the first series of
+# configs/stats.yaml `curves` and the series of two pre-registered primary features. The reason is
+# the shape of the curve, the same in every group: on the long range the broadband h(q) rises with
+# q (reports/figures/stats/mfdfa_curves.png), so its f(alpha) is not the single hump that the
+# card's caption ("wider = more irregular") explains. This was decided after that figure, which
+# shows the groups, had been seen.
+complexity:
+  series: beta
+  fit_range: main
+
+# "Try a sample recording". `synthetic` makes a recording with pdeeg.demo.synthetic_recording
+# (no one's EEG, so its result means nothing); or name a ds002778 recording the models were
+# trained on, e.g. {subject: pd3, session: off}, to see its out-of-fold result and true group.
+sample: synthetic
+sample_seed: 7
+
+# Where the research view (app/research_app.py, `make research`) is served.
+research_url: http://localhost:8502

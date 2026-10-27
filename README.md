@@ -249,7 +249,7 @@ the results and the work files go (default `predictions/`), and `--n-jobs` sets 
 for the MFDFA. The result is written as `<name>_prediction.json` and as a readable
 `<name>_prediction.txt`, which is also printed.
 
-### 3. The Streamlit app (NeuroLab)
+### 3. The app
 
 ```bash
 pip install -e .[app]
@@ -257,38 +257,48 @@ make app                        # or: streamlit run app/streamlit_app.py --serve
 ```
 
 Then open http://localhost:8501. The page is served on this machine only, because the uploads are
-people's EEG. NeuroLab is a dark research workbench with eight pages:
+people's EEG.
 
-- **Overview**: upload one recording, or switch to paired mode, upload two and tick "both
-  recordings are from the same patient". The file is checked straight away; the pipeline
-  (upload, validate, preprocess, extract features, evaluate) shows what has actually run.
-- **Recording Analysis**: every input check with its requirement, and how to fix a failed one;
-  the processing timeline with the time each step took; what the cleaning did (window, filter,
-  ICA components removed, bad windows).
-- **EEG Signal Quality**: the analysed window before and after cleaning, by channel group and
-  time window, with the bad windows marked; the spectrum before and after; each channel's
-  amplitude and share of bad time.
-- **Multifractal Analysis**: fluctuation functions, h(q) and the singularity spectrum of any
-  channel and series, the scalp maps of the features the models use, and the feature table
-  (sortable, downloadable as CSV).
-- **Scalp Topography**: one MFDFA feature or band power over the scalp, with the channels ranked
-  and the region means.
-- **Model Evaluation**: for this recording, what kind of prediction it is (external recording,
-  or out of fold for a training recording; never a prediction on training data), each stage's
-  model score against the out-of-fold scores of the training recordings, its uncertain band, and
-  a "How reliable is this?" panel with the cross-validated balanced accuracy, its 95 % interval,
-  chance and the permutation p-value. A stage that was not better than chance gets a warning and
-  is greyed out. A second tab shows every saved model's cross-validated evidence and model card,
-  with or without a recording.
-- **Research Report**: the whole analysis as one printable HTML file, and the result as the JSON
-  and text that `pdeeg predict` writes.
-- **About & Methodology**: the pipeline with the settings it runs with (read from `configs/`), a
-  glossary, the limitations and the credits.
+![The app after analysing a recording: the verdict with its gauge and trust line, then the graphs](app/assets/screenshot.png)
 
-Nothing is computed from a file before it passes its checks, and nothing is cleaned or predicted
-until "Run analysis" is pressed. The analysis runs in the background, so the pages stay usable
-while it runs, and it is kept by the file's digest: changing a control never cleans again. The
-app calls the same library function as `pdeeg predict` and has no model code of its own.
+The app (`app/streamlit_app.py`) is one page, read from top to bottom:
+
+1. **Upload** a `.bdf` or `.edf` recording, or both of one patient's OFF and ON recordings together
+   (then tick "these are one patient's two recordings"). **Try a sample recording** makes up a
+   signal (`pdeeg.demo.synthetic_recording`) and says that its result means nothing;
+   `configs/app.yaml` can name a ds002778 recording instead.
+2. **Input check**: channels, sampling rate, length and signal level, in plain words. A file that
+   fails one gets what is wrong and how to fix it, and nothing else is done with it.
+3. **Processing**: checking, cleaning the signal, measuring the brain-wave patterns, running the
+   model, each step shown as `pdeeg predict` reaches it. A file is analysed once and kept by its
+   digest, so the page never cleans it again.
+4. **The verdict** of stage 1: Parkinson's pattern detected, not detected, or inconclusive (inside
+   the uncertain band), with a gauge of the score, the cut-off and the band, and one line on how
+   much to trust it, read from the stage's cross-validation. A stage that is not better than chance
+   says so, and a score above the audit threshold is not given.
+5. **Medication**, only after "detected": stage 2's call (OFF, ON or inconclusive; on one
+   recording it is always inconclusive, see [the final models](#the-final-models)), or, for a pair,
+   which recording looks like the OFF-medication one.
+6. **What we saw in the signal**: a few seconds of the cleaned EEG from one channel per scalp region;
+   the band power and the singularity spectrum f(α) of the recording over the ranges of the healthy
+   and the Parkinson's group (mean ± 1 SD over people, from the training feature tables); and the
+   features that moved stage 1 most, in plain words (`app/restwave/plain.py`).
+7. **Report**: the whole analysis as one printable HTML file (print it to PDF from the browser).
+
+A recording of ds002778 gets its out-of-fold result and its true group, never a prediction on
+training data. The page calls the same library function as `pdeeg predict` and has no model code of
+its own; its display settings are in `configs/app.yaml`.
+
+**The research view** (NeuroLab, `app/research_app.py`) has every check, figure and number behind
+the page. `make research` serves it at http://localhost:8502, where the page's footer links to. Its
+eight pages: **Overview** (upload, paired mode, the pipeline's state); **Recording Analysis** (every
+input check, the processing timeline, what the cleaning did); **EEG Signal Quality** (the window
+before and after cleaning, the spectrum, each channel's amplitude and bad time); **Multifractal
+Analysis** (fluctuation functions, h(q) and f(α) of any channel and series, scalp maps, the feature
+table); **Scalp Topography**; **Model Evaluation** (each stage's score against the out-of-fold
+scores, its uncertain band, its cross-validated balanced accuracy with interval, chance and
+permutation p; a stage that is not better than chance is greyed out); **Research Report** (HTML, and
+the JSON and text of `pdeeg predict`); and **About & Methodology**.
 
 ### What an input must be
 
@@ -498,22 +508,23 @@ than knowing the class shares.
 These are the models `pdeeg predict` and the app use. Each is the best combination of its stage's
 task, refitted on all eligible participants. The numbers are those of that combination in the
 classification ablation, so they are optimistic. The rule in `configs/predict.yaml` decides
-whether a stage counts as better than chance, and the app greys out a stage that does not. That
+whether a stage counts as better than chance; the app says when one is not, and the research
+view greys it out. That
 rule was fixed after the p- and q-values of the two pre-registered tasks had been seen, and before
 any result of the two added tasks.
 
 | Stage | Task | Configuration | Balanced accuracy [95 % CI] | p | q | Better than chance? | Uncertain band | In the cascade (fixed configuration) |
 |---|---|---|---|---|---|---|---|---|
-| Stage 1 | `pd_any_vs_hc` | band power + MFDFA, linear SVM | 0.71 [0.55, 0.85] | 0.020 | 0.176 | **no**: shown greyed out | no label from 0.305 to 0.68 | 0.58 [0.40, 0.74], p 0.163 |
+| Stage 1 | `pd_any_vs_hc` | band power + MFDFA, linear SVM | 0.71 [0.55, 0.85] | 0.020 | 0.176 | **no**: the app says so | no label from 0.305 to 0.68 | 0.58 [0.40, 0.74], p 0.163 |
 | Stage 2, one recording | `off_vs_on_single` | band power, logistic regression | 0.77 [0.65, 0.92] | < 0.001 | 0.009 | yes | 0 to 1: never gives a label | 0.71 [0.58, 0.84], p 0.031 |
-| Stage 2, paired | `off_vs_on` | band power, logistic regression | held back for the audit (above 0.85) | - | - | **no**: shown greyed out | none (labels every input; 0.5 itself is uncertain) | not part of the cascade |
+| Stage 2, paired | `off_vs_on` | band power, logistic regression | held back for the audit (above 0.85) | - | - | **no**: the app says so | none (labels every input; 0.5 itself is uncertain) | not part of the cascade |
 
-- **Stage 1** is not better than chance by the rule (q = 0.176 is not below 0.05), and the app greys
-  it out. Its raw p-value is 0.020, but it was picked as the best of 9.
+- **Stage 1** is not better than chance by the rule (q = 0.176 is not below 0.05), and the app says
+  so. Its raw p-value is 0.020, but it was picked as the best of 9.
 - **Stage 2, one recording** is better than chance by the rule (q = 0.009 is below 0.05, and [0.65,
   0.92] is above 0.5). Even so, its out-of-fold probabilities never backed a label, so its uncertain
   band is the whole range from 0 to 1, and it calls every recording uncertain.
-- **Stage 2, paired** is not better than chance by the rule, and the app greys it out. Its
+- **Stage 2, paired** is not better than chance by the rule, and the app says so. Its
   configuration is the one flagged for the audit, so its scores are not reported here. Its two
   probabilities of a pair always sum to 1, so the band rule only asks whether its recalibration
   slope is positive, and it gives no band.
@@ -637,8 +648,9 @@ reports an interval or a permutation test.
 ```
 configs/        YAML configuration: every setting and path
 src/pdeeg/      the package: data/, preprocessing/, features/, stats/, models/, predict/, viz/, cli.py
-app/            NeuroLab, the Streamlit research demo: streamlit_app.py, views/ (the pages),
-                neurolab/ (theme, charts, report), .streamlit/config.toml (the theme)
+app/            the Streamlit app: streamlit_app.py (the page) and restwave/ (its theme, charts,
+                words); research_app.py, views/ and neurolab/ (the research view);
+                .streamlit/config.toml
 tests/          pytest; synthetic data only, except the tests marked "dataset"
 notebooks/      MFDFA validation
 reports/        generated reports and figures

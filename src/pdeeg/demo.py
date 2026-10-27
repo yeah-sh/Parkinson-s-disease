@@ -1,10 +1,11 @@
-"""The research demo's description of one recording (app/streamlit_app.py).
+"""The research demo's description of one recording (app/streamlit_app.py, app/research_app.py).
 
 The app cleans a recording as `pdeeg predict` does (pdeeg.predict.features.clean_input); here
 its series are analysed with the MFDFA settings of configs/features/mfdfa.yaml, its band power
 with those of configs/features/psd.yaml, and the window the cleaning kept is given as it was
 before cleaning, for the app to show the two side by side. Nothing here classifies a
-recording: the app's predictions come from pdeeg.predict.predictor.
+recording: the app's predictions come from pdeeg.predict.predictor. The one exception is
+:func:`synthetic_recording`, the made-up recording behind the app's "Try a sample recording".
 """
 
 from __future__ import annotations
@@ -122,3 +123,38 @@ def band_power(cleaned: mne.io.BaseRaw, config: Config) -> pd.DataFrame:
         list(cleaned.ch_names),
         config.psd,
     )
+
+
+def synthetic_recording(
+    seconds: float = 200.0,
+    sfreq: float = 512.0,
+    seed: int = 0,
+    names: list[str] | None = None,
+    scale: float = 10e-6,
+    montage: str = "biosemi32",
+) -> mne.io.RawArray:
+    """A made-up recording that passes every input check: no one's EEG.
+
+    Pink noise mixed over the scalp, a 10 Hz alpha rhythm strongest at the back of the head,
+    and trigger "1" at 5 s, as ds002778 recordings carry it. ``scale`` is the standard deviation
+    of every channel in volts; ``names`` defaults to the channels of ``montage``.
+    """
+    rng = np.random.default_rng(seed)
+    names = mne.channels.make_standard_montage(montage).ch_names if names is None else names
+    n = int(seconds * sfreq)
+    freqs = np.fft.rfftfreq(n, 1 / sfreq)
+    freqs[0] = freqs[1]
+
+    def pink(k):
+        spectrum = np.fft.rfft(rng.standard_normal((k, n)), axis=1) / np.sqrt(freqs)
+        return np.fft.irfft(spectrum, n=n, axis=1)
+
+    data = rng.standard_normal((len(names), 8)) @ pink(8) + 0.5 * pink(len(names))
+    t = np.arange(n) / sfreq
+    alpha = np.sin(2 * np.pi * 10.0 * t + np.cumsum(rng.normal(0.0, 0.05, n)))
+    posterior = np.array([2.0 if name[0] in "OP" else 0.3 for name in names])
+    data = data / data.std(axis=1, keepdims=True) + posterior[:, None] * alpha
+    data = data / data.std(axis=1, keepdims=True) * scale
+    raw = mne.io.RawArray(data, mne.create_info(list(names), sfreq, "eeg"), verbose="error")
+    raw.set_annotations(mne.Annotations([5.0], [0.0], ["1"]))
+    return raw

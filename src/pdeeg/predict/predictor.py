@@ -38,6 +38,8 @@ from pdeeg.predict.final import REGISTRY, STAGE_TITLES
 from pdeeg.predict.inputs import InputError, Recording, identify_training, read_recording
 
 Say = Callable[[str], None]
+# Said once the features are made, as the models start.
+RUNNING_MODELS = "running the models"
 LABELS = {
     "stage1": {1: "PD", 0: "HC"},
     "stage2_single": {1: "OFF", 0: "ON"},
@@ -437,10 +439,16 @@ def predict_files(
     n_top, rule = config.predict.n_top_features, config.predict.better_than_chance
     vectors = []
     for index, recording in enumerate(recordings):
-        say(f"features of {recording.path.name} (cleaning, MFDFA, band power)")
+        say(f"features of {recording.path.name}")
         folder, name = out_dir / f"{recording.path.stem}_work", f"input{index + 1}"
         tables = recording_tables(
-            recording.raw, config, folder, name=name, source=str(recording.path), n_jobs=n_jobs
+            recording.raw,
+            config,
+            folder,
+            name=name,
+            source=str(recording.path),
+            n_jobs=n_jobs,
+            say=lambda message, file=recording.path.name: say(f"{file}: {message}"),
         )
         files = work_files(config, folder, name)
         result["inputs"][index] |= {"cleaned": str(files["raw"]), "cleaning_log": str(files["log"])}
@@ -452,6 +460,7 @@ def predict_files(
                 for stage in stages
             }
         )
+    say(RUNNING_MODELS)
     outputs = []
     for index, vector in enumerate(vectors):
         name = recordings[index].path.name

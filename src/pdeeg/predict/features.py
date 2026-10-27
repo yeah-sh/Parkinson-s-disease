@@ -15,7 +15,7 @@ the features come out as in the training tables.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,10 @@ from pdeeg.stages import settings_digest, without
 
 # The session an input is filed under in its working directory.
 SESSION = "predict"
+# What :func:`recording_tables` says as each of its steps starts.
+CLEANING = "cleaning (band-pass, re-reference, ICA, bad windows)"
+MFDFA = "MFDFA"
+BAND_POWER = "band power"
 
 
 class FeatureError(Exception):
@@ -119,19 +123,25 @@ def recording_tables(
     name: str = "input",
     source: str = "",
     n_jobs: int = 1,
+    say: Callable[[str], None] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """The wide band-power and MFDFA tables of one recording, one row per ``segments``.
 
     ``raw`` is as for :func:`clean_input`. The cleaned data, its log and QC figures
-    (:func:`work_files`), and the MFDFA runs are written under ``folder``.
+    (:func:`work_files`), and the MFDFA runs are written under ``folder``. ``say`` is told
+    each step as it starts (:data:`CLEANING`, :data:`MFDFA`, :data:`BAND_POWER`).
     """
+    say = say or (lambda _message: None)
+    say(CLEANING)
     clean_input(raw, config, folder, name=name, source=source)
     work = workspace_config(config, Path(folder))
     recording = _entry(name, source)
+    say(MFDFA)
     status = extract_recording(recording, work, n_jobs=n_jobs, force=True)
     if status["status"] != "processed":
         raise FeatureError(f"MFDFA failed: {status['detail']}")
     table = pd.DataFrame([recording])
+    say(BAND_POWER)
     return {
         "psd": psd_wide(build_psd_table(work, table)),
         "mfdfa": mfdfa_wide(build_mfdfa_table(work, table), work.mfdfa),

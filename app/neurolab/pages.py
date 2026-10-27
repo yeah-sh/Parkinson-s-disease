@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class PageInfo:
-    path: str  # relative to app/streamlit_app.py
+    path: str  # relative to app/research_app.py
     title: str
     icon: str
     lede: str

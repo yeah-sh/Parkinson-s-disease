@@ -1,4 +1,4 @@
-"""The research demo's description of a recording, and the app without trained models.
+"""The research demo's description of a recording, and the research app without trained models.
 
 The app's predictions are tested in test_predict.py, with the final models trained there.
 """
@@ -20,7 +20,7 @@ from pdeeg.predict.inputs import read_recording
 from test_preprocessing import DURATION, MONTAGE, SFREQ, synthetic_raw
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "app" / "streamlit_app.py"
+APP = ROOT / "app" / "research_app.py"
 PAGES = ("overview", "recording", "quality", "multifractal", "topography", "evaluation",
          "report", "about")  # fmt: skip
 CHANNELS = mne.channels.make_standard_montage(MONTAGE).ch_names
@@ -118,7 +118,7 @@ def test_band_power_is_computed_per_channel_as_for_training(analysed):
     assert np.isfinite(clean["value"]).all() and (clean["value"] < 0).all()
 
 
-# --- the app (app/streamlit_app.py) -----------------------------------------------------------
+# --- the research app (app/research_app.py) ----------------------------------------------------
 
 
 def html(app) -> str:

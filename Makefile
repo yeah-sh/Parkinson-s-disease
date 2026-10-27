@@ -5,7 +5,7 @@
 #   make features N_JOBS=8    with this many processes
 #   make train-final          the final models (models/), after classify and cascade
 #   make predict FILE=x.bdf [PAIRED=y.bdf]   a research demo, not a diagnostic tool
-#   make test | lint | format | docker-build | docker-run | app
+#   make test | lint | format | docker-build | docker-run | app | research
 #
 # Plain `make` prints this list rather than starting a pipeline that can take hours.
 
@@ -29,14 +29,14 @@ PARALLEL_STEPS := preprocess features stats classify cascade psd-features mfdfa-
 .DEFAULT_GOAL := help
 .PHONY: help install install-app all download recordings $(PARALLEL_STEPS) report \
 	mfdfa-scaling config train-final predict check-file test lint format docker-build \
-	docker-run docker-train-final docker-predict app
+	docker-run docker-train-final docker-predict app research
 
 help:
 	@echo "Pipeline:  all download recordings preprocess features stats classify cascade report"
 	@echo "Parts:     psd-features mfdfa-features mfdfa-curves mfdfa-scaling config"
 	@echo "Models:    train-final, predict FILE=recording.bdf [PAIRED=other.bdf]"
 	@echo "Options:   FORCE=1 (run even if current), N_JOBS=n, CONFIG_DIR=path"
-	@echo "Project:   install install-app test lint format docker-build docker-run app"
+	@echo "Project:   install install-app test lint format docker-build docker-run app research"
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -92,3 +92,6 @@ docker-predict: check-file
 
 app:  # uploads stay on this machine: the page is served on localhost only
 	$(PYTHON) -m streamlit run app/streamlit_app.py --server.address localhost
+
+research:  # the research view, on the port app's footer links to (configs/app.yaml research_url)
+	$(PYTHON) -m streamlit run app/research_app.py --server.address localhost --server.port 8502

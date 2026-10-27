@@ -267,9 +267,7 @@ def analysis(digest: str | None = None) -> Analysis | None:
     return None if digest is None else _store().get(digest)
 
 
-def _describe(
-    path: Path, entry: dict[str, Any], index: int, work: Path, config
-) -> Described | None:
+def describe(path: Path, entry: dict[str, Any], index: int, work: Path, config) -> Described | None:
     """The cleaned data of one input, from predict_files' work files when it made them, else
     cleaned here as `predict` cleans (a training recording, or no usable models)."""
     try:
@@ -353,7 +351,7 @@ def run_analysis(
                 else f"Cleaning {name} as `predict` does (ICA takes a minute or two), then "
                 "describing it",
             )
-            described.append(_describe(path, entry, index, work, config))
+            described.append(describe(path, entry, index, work, config))
     seconds = time.perf_counter() - started
     steps[-1]["seconds"] = seconds - steps[-1]["start"]
     done = Analysis(

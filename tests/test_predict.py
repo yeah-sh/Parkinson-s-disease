@@ -16,6 +16,7 @@ import pytest
 
 from pdeeg import cli, pipeline
 from pdeeg.config import FINAL_STAGES, FinalStageConfig, load_config
+from pdeeg.demo import synthetic_recording
 from pdeeg.features.tables import table_paths
 from pdeeg.models.calibration import uncertain_band
 from pdeeg.predict.features import feature_digest, recording_tables
@@ -37,31 +38,6 @@ CONFIG = load_config(CONFIG_DIR)
 SCALP = mne.channels.make_standard_montage("biosemi32").ch_names
 
 
-def synthetic_raw(
-    seconds: float = 200.0, sfreq: float = 512.0, seed: int = 0, names=None, scale=10e-6
-) -> mne.io.RawArray:
-    """Pink noise mixed over the scalp, posterior alpha, and trigger "1" at 5 s."""
-    rng = np.random.default_rng(seed)
-    names = SCALP if names is None else names
-    n = int(seconds * sfreq)
-    freqs = np.fft.rfftfreq(n, 1 / sfreq)
-    freqs[0] = freqs[1]
-
-    def pink(k):
-        spectrum = np.fft.rfft(rng.standard_normal((k, n)), axis=1) / np.sqrt(freqs)
-        return np.fft.irfft(spectrum, n=n, axis=1)
-
-    data = rng.standard_normal((len(names), 8)) @ pink(8) + 0.5 * pink(len(names))
-    t = np.arange(n) / sfreq
-    alpha = np.sin(2 * np.pi * 10.0 * t + np.cumsum(rng.normal(0.0, 0.05, n)))
-    posterior = np.array([2.0 if name[0] in "OP" else 0.3 for name in names])
-    data = data / data.std(axis=1, keepdims=True) + posterior[:, None] * alpha
-    data = data / data.std(axis=1, keepdims=True) * scale
-    raw = mne.io.RawArray(data, mne.create_info(list(names), sfreq, "eeg"), verbose="error")
-    raw.set_annotations(mne.Annotations([5.0], [0.0], ["1"]))
-    return raw
-
-
 def write_edf(raw: mne.io.BaseRaw, path: Path) -> Path:
     mne.export.export_raw(path, raw, fmt="edf", overwrite=True, verbose="error")
     return path
@@ -73,7 +49,7 @@ def write_edf(raw: mne.io.BaseRaw, path: Path) -> Path:
 def test_a_good_recording_is_read_in_montage_order(tmp_path):
     names = [{"T7": "T3", "T8": "T4", "P7": "T5", "P8": "T6"}.get(n, n) for n in SCALP]
     names = [f"EEG {n}-REF" if n == "Fp1" else n for n in names][::-1]  # any order
-    path = write_edf(synthetic_raw(names=names), tmp_path / "old_names.edf")
+    path = write_edf(synthetic_recording(names=names), tmp_path / "old_names.edf")
 
     recording = read_recording(path, CONFIG)
 
@@ -95,7 +71,7 @@ def test_a_good_recording_is_read_in_montage_order(tmp_path):
     ],
 )
 def test_unusable_recordings_are_refused(tmp_path, change, message):
-    path = write_edf(synthetic_raw(**change), tmp_path / "bad.edf")
+    path = write_edf(synthetic_recording(**change), tmp_path / "bad.edf")
 
     with pytest.raises(InputError, match=message):
         read_recording(path, CONFIG)
@@ -103,7 +79,7 @@ def test_unusable_recordings_are_refused(tmp_path, change, message):
 
 def test_two_channels_claiming_one_name_are_refused(tmp_path):
     names = [*SCALP[:-1], "EEG Fp1"]  # Cz missing, Fp1 twice
-    path = write_edf(synthetic_raw(names=names), tmp_path / "twice.edf")
+    path = write_edf(synthetic_recording(names=names), tmp_path / "twice.edf")
 
     with pytest.raises(InputError, match="would both be Fp1"):
         read_recording(path, CONFIG)
@@ -123,7 +99,7 @@ def test_other_files_are_refused(tmp_path):
 
 
 def test_another_sampling_rate_is_resampled_with_a_note(tmp_path):
-    path = write_edf(synthetic_raw(sfreq=256.0), tmp_path / "slow.edf")
+    path = write_edf(synthetic_recording(sfreq=256.0), tmp_path / "slow.edf")
 
     recording = read_recording(path, CONFIG)
 
@@ -133,14 +109,18 @@ def test_another_sampling_rate_is_resampled_with_a_note(tmp_path):
 
 def test_every_check_is_kept_to_show_the_person_who_gave_the_file(tmp_path):
     names = ["file", "channels", "sampling rate", "duration", "amplitude"]
-    slow = read_recording(write_edf(synthetic_raw(sfreq=256.0), tmp_path / "slow.edf"), CONFIG)
+    slow = read_recording(
+        write_edf(synthetic_recording(sfreq=256.0), tmp_path / "slow.edf"), CONFIG
+    )
 
     assert [check.name for check in slow.checks] == names
     assert {c.name: c.status for c in slow.checks}["sampling rate"] == "note"
     assert {c.status for c in slow.checks} == {"passed", "note"}
 
     with pytest.raises(InputError) as refused:
-        read_recording(write_edf(synthetic_raw(seconds=100.0), tmp_path / "short.edf"), CONFIG)
+        read_recording(
+            write_edf(synthetic_recording(seconds=100.0), tmp_path / "short.edf"), CONFIG
+        )
     checks = [(check.name, check.status) for check in refused.value.checks]
     assert checks == [*((name, "passed") for name in names[:3]), ("duration", "failed")]
     assert refused.value.checks[-1].detail == str(refused.value)
@@ -164,7 +144,7 @@ def _registry(recording, subject="pd3", session="off"):
 
 
 def test_a_training_recording_is_recognised_by_file_signal_or_bids_name(tmp_path):
-    raw = synthetic_raw(seed=3)
+    raw = synthetic_recording(seed=3)
     original = read_recording(write_edf(raw, tmp_path / "original.edf"), CONFIG)
     registry = _registry(original)
 
@@ -180,14 +160,14 @@ def test_a_training_recording_is_recognised_by_file_signal_or_bids_name(tmp_path
     assert other.file_sha256 != original.file_sha256
     assert identify_training(other, registry, CONFIG)["matched_by"] == "hash of the signal"
 
-    unrelated = read_recording(write_edf(synthetic_raw(seed=4), tmp_path / "new.edf"), CONFIG)
+    unrelated = read_recording(write_edf(synthetic_recording(seed=4), tmp_path / "new.edf"), CONFIG)
     assert identify_training(unrelated, registry, CONFIG) is None
 
     # By name, in a BIDS dataset of the training data, whatever the signal.
     from mne_bids import BIDSPath, write_raw_bids
 
     root = tmp_path / "bids"
-    raw4 = synthetic_raw(seed=4)
+    raw4 = synthetic_recording(seed=4)
     raw4.info["line_freq"] = 60.0
     bids_path = BIDSPath(subject="pd3", session="off", task="rest", datatype="eeg", root=root)
     write_raw_bids(raw4, bids_path, format="EDF", allow_preload=True, verbose="error")
@@ -308,7 +288,7 @@ def trained(tmp_path_factory):
     unbanded = config
     config = dataclasses.replace(config, predict=dataclasses.replace(config.predict, stages=stages))
 
-    training = read_recording(write_edf(synthetic_raw(seed=2), root / "training.edf"), config)
+    training = read_recording(write_edf(synthetic_recording(seed=2), root / "training.edf"), config)
     written = train_final(
         config, recordings, tables, summary, registry=_registry(training), say=quiet.append
     )
@@ -394,8 +374,8 @@ def test_a_training_recording_gets_its_out_of_fold_results(trained, monkeypatch,
 
 
 def test_two_new_recordings_go_through_every_stage(trained, tmp_path):
-    first = write_edf(synthetic_raw(seed=11), tmp_path / "first.edf")
-    second = write_edf(synthetic_raw(seed=12, sfreq=256.0), tmp_path / "second.edf")
+    first = write_edf(synthetic_recording(seed=11), tmp_path / "first.edf")
+    second = write_edf(synthetic_recording(seed=12, sfreq=256.0), tmp_path / "second.edf")
 
     result = predict_files(
         trained.config, [first, second], out_dir=tmp_path, n_jobs=2, say=lambda _: None
@@ -471,10 +451,10 @@ def test_each_stage_says_how_it_did_without_a_recording(trained):
     assert stage_evidence(dataclasses.replace(trained.config, predict=elsewhere)) == {}
 
 
-# --- the app (app/streamlit_app.py) -------------------------------------------------------------
+# --- the research app (app/research_app.py) ----------------------------------------------------
 
 
-APP = Path(__file__).resolve().parents[1] / "app" / "streamlit_app.py"
+APP = Path(__file__).resolve().parents[1] / "app" / "research_app.py"
 
 
 @pytest.fixture
@@ -531,7 +511,7 @@ def test_the_app_checks_an_upload_then_shows_what_predict_gives(
     from pdeeg.predict.predictor import trained_on
 
     results = _spy(monkeypatch)
-    path = write_edf(synthetic_raw(seed=21), tmp_path / "new_recording.edf")
+    path = write_edf(synthetic_recording(seed=21), tmp_path / "new_recording.edf")
     app = open_app()
     people = trained_on(trained.config)["participants"]
     banner = next(m.value for m in app.sidebar.markdown if "not a diagnostic tool" in m.value)
@@ -583,7 +563,7 @@ def test_the_app_checks_an_upload_then_shows_what_predict_gives(
 
 def test_the_app_stops_before_predicting_a_file_that_fails_a_check(open_app, tmp_path, monkeypatch):
     results = _spy(monkeypatch)
-    short = write_edf(synthetic_raw(seconds=100.0), tmp_path / "short.edf")
+    short = write_edf(synthetic_recording(seconds=100.0), tmp_path / "short.edf")
     app = open_app()
 
     app.file_uploader[0].set_value(_upload(short)).run()
@@ -600,8 +580,8 @@ def test_the_app_stops_before_predicting_a_file_that_fails_a_check(open_app, tmp
     next(b for b in app.button if b.label == "Clear recording").click().run()
     assert len(app.file_uploader) == 1
     app.segmented_control[0].set_value("paired").run()  # two good files, not said to be one patient
-    first = write_edf(synthetic_raw(seed=31), tmp_path / "first.edf")
-    second = write_edf(synthetic_raw(seed=32), tmp_path / "second.edf")
+    first = write_edf(synthetic_recording(seed=31), tmp_path / "first.edf")
+    second = write_edf(synthetic_recording(seed=32), tmp_path / "second.edf")
     app.file_uploader[0].set_value(_upload(first))
     app.file_uploader[1].set_value(_upload(second)).run()
 

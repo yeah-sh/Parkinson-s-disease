@@ -1,5 +1,6 @@
-# NeuroLab theme, read by Streamlit from next to app/streamlit_app.py whatever the working
-# directory. The same colours are the design tokens of app/neurolab/theme.py.
+# Shared by both apps in app/ (streamlit_app.py and research_app.py), read by Streamlit from next
+# to the script whatever the working directory. These are NeuroLab's colours
+# (app/neurolab/theme.py); the single page restyles itself on top (app/restwave/theme.py).
 
 [server]
 # Uploads are people's EEG: keep them on this machine (as `make app` does).

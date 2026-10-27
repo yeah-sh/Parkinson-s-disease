@@ -1,7 +1,10 @@
-"""NeuroLab, the research demo of pdeeg: one EEG recording, or a patient's two. Not diagnostic.
+"""NeuroLab, the research view of pdeeg: one EEG recording, or a patient's two. Not diagnostic.
 
     pip install -e ".[app]"
-    streamlit run app/streamlit_app.py        # or: make app
+    streamlit run app/research_app.py        # or: make research
+
+The everyday page is app/streamlit_app.py (`make app`), one page with the verdict and four
+graphs; this is the workbench behind it, with every check, figure and number.
 
 A BDF or EDF file with the channels of the dataset's montage is checked first; nothing else is
 done with a file that fails a check. On request the app then runs the code of `pdeeg predict`
