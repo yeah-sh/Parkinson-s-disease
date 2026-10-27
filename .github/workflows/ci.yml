@@ -1,7 +1,7 @@
 name: CI
 
-# Lint and unit tests on synthetic data. The OpenNeuro dataset is never downloaded here: the one
-# test that reads it is marked `dataset` and left out.
+# Lint and unit tests on synthetic data. The OpenNeuro dataset is never downloaded here: the two
+# tests that read it are marked `dataset` and left out.
 
 on:
   push:

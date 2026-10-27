@@ -75,7 +75,9 @@ There is no external test set. Every number below comes from cross-validation wi
   participant on both sides.
 - **Intervals.** 95 % bootstrap intervals over participants (2000 resamples).
 - **p-values.** 1000 relabellings of participants, each through the whole nested procedure.
-- **q-values.** Benjamini-Hochberg within each task's combinations.
+- **q-values.** Benjamini-Hochberg over every evaluation of a task: 12 p-values for the tasks
+  between people (9 combinations and the 3 age-and-sex baselines), 9 for the tasks within
+  patients.
 - **Other splits.** The spread over 10 other outer splits.
 - **Metrics.** Balanced accuracy, the main one, with chance at 0.5. Also ROC AUC, sensitivity
   (the patients, or the OFF recordings, that were found), specificity, and, in the cascade, Brier

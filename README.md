@@ -598,9 +598,10 @@ in the training tables.
 - **A probability per stage.** It is Platt-scaled, and a stage calls the positive class at 0.5 or
   more. Inside the stage's uncertain band it gives no label, and says "uncertain".
 - **How the stage did in cross-validation.** This means the balanced accuracy with its 95 %
-  interval, the permutation p-value, and the q-value adjusted for having picked the best of 9
-  combinations. A stage counts as better than chance only when q is below 0.05 and the whole
-  interval is above 0.5.
+  interval, the permutation p-value, and the q-value. The q-value is Benjamini-Hochberg over
+  every evaluation of the stage's task: the 9 feature set and model combinations, plus the 3
+  age-and-sex baselines for the tasks between people. A stage counts as better than chance only
+  when q is below 0.05 and the whole interval is above 0.5.
 - **The features that moved the prediction most.** For a linear model, this is each feature's
   coefficient times its standardised value.
 - **Recordings of ds002778 itself get no new prediction.** The final models were trained on them,
