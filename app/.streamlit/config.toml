@@ -1,0 +1,49 @@
+# NeuroLab theme, read by Streamlit from next to app/streamlit_app.py whatever the working
+# directory. The same colours are the design tokens of app/neurolab/theme.py.
+
+[server]
+# Uploads are people's EEG: keep them on this machine (as `make app` does).
+address = "localhost"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# No "Deploy" button: this app is run locally.
+toolbarMode = "minimal"
+
+[theme]
+base = "dark"
+primaryColor = "#22D3EE"
+backgroundColor = "#0B1020"
+secondaryBackgroundColor = "#151F33"
+textColor = "#E6EDF7"
+borderColor = "#22304A"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "6px"
+buttonRadius = "6px"
+font = "sans-serif"
+codeFont = "monospace"
+baseFontSize = 15
+headingFontWeights = [650, 600, 600, 600, 600, 600]
+metricValueFontSize = "1.55rem"
+metricValueFontWeight = 600
+linkColor = "#5EEAD4"
+codeTextColor = "#5EEAD4"
+codeBackgroundColor = "#151F33"
+# Amber for uncertainty and warnings; red only for errors; teal for checks that passed.
+orangeColor = "#F5B544"
+yellowColor = "#F5B544"
+redColor = "#F26D6D"
+greenColor = "#3CCFB4"
+blueColor = "#22D3EE"
+grayColor = "#55637D"
+dataframeBorderColor = "#1F2B42"
+dataframeHeaderBackgroundColor = "#111A2D"
+dataframeHeaderTextColor = "#A3B1C6"
+chartCategoricalColors = ["#1a9fc0", "#d65f7e"]
+
+[theme.sidebar]
+backgroundColor = "#0D1426"
+secondaryBackgroundColor = "#151F33"

@@ -32,6 +32,7 @@ import sklearn
 from sklearn.pipeline import Pipeline
 
 from pdeeg.config import ChanceConfig, Config
+from pdeeg.models.classify import AUDIT_ABOVE
 from pdeeg.predict.features import feature_digest, feature_vector, recording_tables, work_files
 from pdeeg.predict.final import REGISTRY, STAGE_TITLES
 from pdeeg.predict.inputs import InputError, Recording, identify_training, read_recording
@@ -266,6 +267,48 @@ def trained_on(config: Config) -> dict[str, Any] | None:
         "recordings": training["recordings"],
         "dataset": info["dataset"],
     }
+
+
+EVIDENCE_METRICS = ("balanced_accuracy", "roc_auc", "sensitivity", "specificity")
+
+
+def stage_evidence(config: Config) -> dict[str, dict[str, Any]]:
+    """How every saved stage did in cross-validation, read from its files, without a recording.
+
+    One entry per stage that has a model (none before ``pdeeg train-final``): its title, task,
+    model and classes, its threshold and uncertain band, ``cross_validated`` as every prediction
+    of the stage carries it, the selected configuration's metrics with their intervals, its
+    model card, the out-of-fold predictions it was scored on (``oof``), and ``audit_above``,
+    the balanced accuracy above which the project audits a result before reporting it.
+    """
+    rule = config.predict.better_than_chance
+    evidence = {}
+    for stage in STAGE_TITLES:
+        if not (config.predict.models_dir / stage / "metadata.json").is_file():
+            continue
+        info = _metadata(config, stage)
+        cv = info["cross_validated"]
+        evidence[stage] = {
+            "stage": stage,
+            "title": STAGE_TITLES[stage],
+            "task": info["task"],
+            "model": f"{info['model']} on {info['feature_set']}",
+            "classes": info["classes"],
+            "paired": info["paired"],
+            "threshold": float(info["thresholds"]["threshold"]),
+            "uncertain_band": [float(x) for x in info["thresholds"]["uncertain"]],
+            "out_of_fold_labelling": info["thresholds"]["out_of_fold"],
+            "cross_validated": _validation(cv, rule),
+            "metrics": {
+                name: cv["selected"][name] for name in EVIDENCE_METRICS if name in cv["selected"]
+            },
+            "model_card": info["model_card"],
+            "trained_at": info["trained_at"],
+            "dataset": info["dataset"],
+            "audit_above": AUDIT_ABOVE,
+            "oof": _oof(config, stage),
+        }
+    return evidence
 
 
 def training_result(

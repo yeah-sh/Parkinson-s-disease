@@ -249,7 +249,7 @@ the results and the work files go (default `predictions/`), and `--n-jobs` sets 
 for the MFDFA. The result is written as `<name>_prediction.json` and as a readable
 `<name>_prediction.txt`, which is also printed.
 
-### 3. The Streamlit app
+### 3. The Streamlit app (NeuroLab)
 
 ```bash
 pip install -e .[app]
@@ -257,18 +257,38 @@ make app                        # or: streamlit run app/streamlit_app.py --serve
 ```
 
 Then open http://localhost:8501. The page is served on this machine only, because the uploads are
-people's EEG. Upload one recording, or switch on paired mode, upload two and tick "both recordings
-are from the same patient". The page shows:
+people's EEG. NeuroLab is a dark research workbench with eight pages:
 
-- the input checks first, and stops with the reason if one fails;
-- each stage's probability bar with its uncertain band and an "uncertain" badge;
-- for each stage, a "How reliable is this?" panel with the cross-validated balanced accuracy, its
-  95 % interval, chance, and the permutation p-value. A stage that was not better than chance is
-  greyed out with "this model is not better than chance";
-- the features that moved the prediction, and the MFDFA figures of the cleaned recording, which
-  are the data the models saw.
+- **Overview**: upload one recording, or switch to paired mode, upload two and tick "both
+  recordings are from the same patient". The file is checked straight away; the pipeline
+  (upload, validate, preprocess, extract features, evaluate) shows what has actually run.
+- **Recording Analysis**: every input check with its requirement, and how to fix a failed one;
+  the processing timeline with the time each step took; what the cleaning did (window, filter,
+  ICA components removed, bad windows).
+- **EEG Signal Quality**: the analysed window before and after cleaning, by channel group and
+  time window, with the bad windows marked; the spectrum before and after; each channel's
+  amplitude and share of bad time.
+- **Multifractal Analysis**: fluctuation functions, h(q) and the singularity spectrum of any
+  channel and series, the scalp maps of the features the models use, and the feature table
+  (sortable, downloadable as CSV).
+- **Scalp Topography**: one MFDFA feature or band power over the scalp, with the channels ranked
+  and the region means.
+- **Model Evaluation**: for this recording, what kind of prediction it is (external recording,
+  or out of fold for a training recording; never a prediction on training data), each stage's
+  model score against the out-of-fold scores of the training recordings, its uncertain band, and
+  a "How reliable is this?" panel with the cross-validated balanced accuracy, its 95 % interval,
+  chance and the permutation p-value. A stage that was not better than chance gets a warning and
+  is greyed out. A second tab shows every saved model's cross-validated evidence and model card,
+  with or without a recording.
+- **Research Report**: the whole analysis as one printable HTML file, and the result as the JSON
+  and text that `pdeeg predict` writes.
+- **About & Methodology**: the pipeline with the settings it runs with (read from `configs/`), a
+  glossary, the limitations and the credits.
 
-The app calls the same library function as `pdeeg predict` and has no model code of its own.
+Nothing is computed from a file before it passes its checks, and nothing is cleaned or predicted
+until "Run analysis" is pressed. The analysis runs in the background, so the pages stay usable
+while it runs, and it is kept by the file's digest: changing a control never cleans again. The
+app calls the same library function as `pdeeg predict` and has no model code of its own.
 
 ### What an input must be
 
@@ -617,7 +637,8 @@ reports an interval or a permutation test.
 ```
 configs/        YAML configuration: every setting and path
 src/pdeeg/      the package: data/, preprocessing/, features/, stats/, models/, predict/, viz/, cli.py
-app/            Streamlit research demo (the predictions of `pdeeg predict`, MFDFA figures)
+app/            NeuroLab, the Streamlit research demo: streamlit_app.py, views/ (the pages),
+                neurolab/ (theme, charts, report), .streamlit/config.toml (the theme)
 tests/          pytest; synthetic data only, except the tests marked "dataset"
 notebooks/      MFDFA validation
 reports/        generated reports and figures

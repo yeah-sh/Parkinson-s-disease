@@ -1,8 +1,10 @@
-"""The MFDFA figures of the research demo (app/streamlit_app.py): one cleaned recording, described.
+"""The research demo's description of one recording (app/streamlit_app.py).
 
 The app cleans a recording as `pdeeg predict` does (pdeeg.predict.features.clean_input); here
-its series are analysed with the MFDFA settings of configs/features/mfdfa.yaml. Nothing here
-classifies a recording: the app's predictions come from pdeeg.predict.predictor.
+its series are analysed with the MFDFA settings of configs/features/mfdfa.yaml, its band power
+with those of configs/features/psd.yaml, and the window the cleaning kept is given as it was
+before cleaning, for the app to show the two side by side. Nothing here classifies a
+recording: the app's predictions come from pdeeg.predict.predictor.
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ from pdeeg.config import Config
 from pdeeg.features.curves import fit_curves
 from pdeeg.features.extract import bad_sample_mask, fit_features, range_scales, series_masks
 from pdeeg.features.mfdfa import make_qs, mfdfa
+from pdeeg.features.psd import recording_band_powers
 from pdeeg.features.scaling import analysis_series, fit_ranges, inspection_scales
+from pdeeg.preprocessing.pipeline import crop_window
 
 _VOLTS_TO_UV = 1e6
 
@@ -88,3 +92,33 @@ def channel_features(data: Series, name: str, fit_range: str, config: Config) ->
 def ranges_in_seconds(name: str, config: Config) -> dict[str, tuple[float, float]]:
     """The configured fit ranges of the series ``name``."""
     return fit_ranges(config.mfdfa, name)
+
+
+def before_cleaning(raw: mne.io.BaseRaw, config: Config) -> np.ndarray:
+    """The window the cleaning keeps, as it was before cleaning, in µV (channels x samples).
+
+    ``raw`` is a checked recording (:func:`pdeeg.predict.inputs.read_recording`). The window
+    and the re-reference are those of :func:`pdeeg.preprocessing.pipeline.preprocess_raw`,
+    whose "before" spectrum is of these data: no filter and no ICA. Sample ``i`` here is
+    sample ``i`` of the cleaned recording.
+    """
+    prep = config.preprocessing
+    sfreq = raw.info["sfreq"]
+    start, _ = crop_window(raw, prep.crop)
+    n_keep = int(round(prep.crop.duration * sfreq))
+    window = raw.copy().crop(start / sfreq, (start + n_keep - 1) / sfreq).load_data()
+    reference = "average" if prep.reference == "average" else list(prep.reference)
+    window.set_eeg_reference(reference, projection=False, verbose="error")
+    return window.get_data() * _VOLTS_TO_UV
+
+
+def band_power(cleaned: mne.io.BaseRaw, config: Config) -> pd.DataFrame:
+    """Band power of every channel of a cleaned recording, computed as the training features
+    were (:func:`pdeeg.features.psd.recording_band_powers`), with and without bad windows."""
+    return recording_band_powers(
+        cleaned.get_data() * _VOLTS_TO_UV,
+        bad_sample_mask(cleaned),
+        float(cleaned.info["sfreq"]),
+        list(cleaned.ch_names),
+        config.psd,
+    )

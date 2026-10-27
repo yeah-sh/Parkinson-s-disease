@@ -4,6 +4,7 @@ import argparse
 import dataclasses
 import json
 import shutil
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -441,6 +442,35 @@ def test_a_model_trained_with_other_settings_is_refused(trained, tmp_path):
         load_stage(other, "stage1")
 
 
+# --- the saved models' evidence, without a recording ------------------------------------------
+
+
+def test_each_stage_says_how_it_did_without_a_recording(trained):
+    from pdeeg.predict.predictor import stage_evidence
+
+    evidence = stage_evidence(trained.config)
+
+    assert list(evidence) == list(FINAL_STAGES)
+    for stage, entry in evidence.items():
+        folder = trained.config.predict.models_dir / stage
+        info = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+        selected = info["cross_validated"]["selected"]["balanced_accuracy"]
+        cv = entry["cross_validated"]
+        assert cv["balanced_accuracy"] == selected["value"]
+        assert cv["ci95"] == [selected["low"], selected["high"]]
+        assert set(entry["metrics"]) == {
+            "balanced_accuracy",
+            "roc_auc",
+            "sensitivity",
+            "specificity",
+        }
+        assert entry["uncertain_band"] == list(trained.config.predict.stages[stage].uncertain)
+        oof = pd.read_parquet(folder / "oof_predictions.parquet")
+        pd.testing.assert_frame_equal(entry["oof"], oof)
+    elsewhere = dataclasses.replace(trained.config.predict, models_dir=trained.root / "none")
+    assert stage_evidence(dataclasses.replace(trained.config, predict=elsewhere)) == {}
+
+
 # --- the app (app/streamlit_app.py) -------------------------------------------------------------
 
 
@@ -479,6 +509,22 @@ def _spy(monkeypatch) -> list[dict]:
     return results
 
 
+def _html(app) -> str:
+    return " ".join(element.proto.body for element in app.get("html"))
+
+
+def _analyse(app, timeout: float = 900.0):
+    """Start the analysis and rerun the page until it has finished in the background."""
+    next(button for button in app.button if button.label == "Run analysis").click().run()
+    deadline = time.monotonic() + timeout
+    while any(status.label.startswith("Analysing") for status in app.status):
+        assert time.monotonic() < deadline, "the analysis did not finish"
+        time.sleep(0.5)
+        app.run()
+    assert not app.exception
+    return app
+
+
 def test_the_app_checks_an_upload_then_shows_what_predict_gives(
     open_app, trained, tmp_path, monkeypatch
 ):
@@ -488,7 +534,7 @@ def test_the_app_checks_an_upload_then_shows_what_predict_gives(
     path = write_edf(synthetic_raw(seed=21), tmp_path / "new_recording.edf")
     app = open_app()
     people = trained_on(trained.config)["participants"]
-    banner = app.warning[0].value
+    banner = next(m.value for m in app.sidebar.markdown if "not a diagnostic tool" in m.value)
     assert "Research demo – not a diagnostic tool." in banner
     assert f"Trained on {people} people from one dataset (OpenNeuro ds002778)" in banner
     assert "not validated on other recordings" in banner
@@ -496,36 +542,43 @@ def test_the_app_checks_an_upload_then_shows_what_predict_gives(
     app.file_uploader[0].set_value(_upload(path)).run()
 
     assert not app.exception and not app.error
-    assert [h.value for h in app.subheader][0] == "Input checks"
-    checks = next(m.value for m in app.markdown if "new\\_recording.edf" in m.value)
-    for check in ("channels", "sampling rate", "duration"):
-        assert f"**{check}**" in checks
-    assert [h.value for h in app.header] == [
-        "Prediction",
-        "Top contributing features",
-        "The recording",
-    ]
+    assert "new_recording.edf" in _html(app)
+    assert not results  # checked, but nothing is predicted before it is asked for
+    app.switch_page("views/recording.py").run()
+    checks = _html(app)
+    for check in ("file", "channels", "sampling rate", "duration", "amplitude"):
+        assert f'<div class="n">{check}</div>' in checks
+    assert "nl-check failed" not in checks
+    _analyse(app)
     (result,) = results  # the app predicted through predict_files, once
+
+    app.switch_page("views/evaluation.py").run()
+    assert not app.exception and not app.error
+    assert "External, unseen recording" in _html(app)
+    this = app.tabs[0]
     ran = [stage for stage in result["stages"] if "skipped" not in stage]
-    assert [e.label for e in app.expander].count("How reliable is this?") == len(ran)
+    assert [e.label for e in this.expander].count("How reliable is this?") == len(ran)
     stage1 = result["stages"][0]
-    shown = f"Probability of Parkinson's: **{stage1['probability']:.2f}**."
-    assert any(m.value.startswith(shown) for m in app.markdown)
+    shown = f"Model score for Parkinson's: **{stage1['probability']:.2f}**"
+    assert any(m.value == shown for m in this.markdown)
     cv = stage1["cross_validated"]
-    metrics = {m.label: m.value for m in app.metric}
+    metrics = {m.label: m.value for m in this.metric}
     assert metrics["Balanced accuracy"] == f"{cv['balanced_accuracy']:.2f}"
     assert metrics["95% CI"] == f"{cv['ci95'][0]:.2f} – {cv['ci95'][1]:.2f}"
     assert metrics["Chance"] == "0.50"
     assert metrics["Permutation p"] == f"{cv['permutation_p']:.3f}"
-    greyed = [w for w in app.warning if "not better than chance" in w.value]
-    assert len(greyed) == sum(not stage["cross_validated"]["better_than_chance"] for stage in ran)
-    assert "Stage 2 · OFF vs ON medication" in [h.value for h in app.subheader]
-    assert [h.value for h in app.subheader][-3:] == [
-        "Fluctuation functions",
-        "Singularity spectrum",
-        "Over the scalp",
-    ]
-    assert "not a diagnostic tool" in app.caption[-1].value
+    weak = [w for w in this.warning if "Not better than chance" in w.value]
+    assert len(weak) == sum(not stage["cross_validated"]["better_than_chance"] for stage in ran)
+    assert "#### Stage 2 · OFF vs ON medication" in [m.value for m in this.markdown]
+
+    app.switch_page("views/multifractal.py").run()
+    assert not app.exception and len(app.dataframe) == 1
+    app.switch_page("views/report.py").run()
+    next(b for b in app.button if b.label == "Build report").click().run()
+    assert not app.exception
+    labels = [button.label for button in app.get("download_button")]
+    assert {"Report (HTML)", "Result (JSON)", "Summary (text)"} <= set(labels)
+    assert any("not a diagnostic tool" in m.value for m in app.sidebar.markdown)
 
 
 def test_the_app_stops_before_predicting_a_file_that_fails_a_check(open_app, tmp_path, monkeypatch):
@@ -537,18 +590,26 @@ def test_the_app_stops_before_predicting_a_file_that_fails_a_check(open_app, tmp
 
     assert not app.exception
     assert "short.edf cannot be used" in app.error[0].value and "at least" in app.error[0].value
-    assert not app.header and not results
+    assert "Run analysis" not in [button.label for button in app.button] and not results
+    app.switch_page("views/recording.py").run()
+    assert "nl-check failed" in _html(app) and "How to fix" in _html(app)
+    app.switch_page("views/multifractal.py").run()
+    assert not app.exception and "did not pass its checks" in _html(app)
 
-    app.toggle[0].set_value(True).run()  # paired mode: two good files, not said to be one patient
+    app.switch_page("views/overview.py").run()
+    next(b for b in app.button if b.label == "Clear recording").click().run()
+    assert len(app.file_uploader) == 1
+    app.segmented_control[0].set_value("paired").run()  # two good files, not said to be one patient
     first = write_edf(synthetic_raw(seed=31), tmp_path / "first.edf")
     second = write_edf(synthetic_raw(seed=32), tmp_path / "second.edf")
     app.file_uploader[0].set_value(_upload(first))
     app.file_uploader[1].set_value(_upload(second)).run()
 
     assert not app.exception and not app.error
-    assert len([m for m in app.markdown if "**sampling rate**" in m.value]) == 2  # both checked
+    assert "first.edf" in _html(app) and "second.edf" in _html(app)  # both checked
     assert any("same patient" in warning.value for warning in app.warning)
-    assert not app.header and not results
+    assert next(b for b in app.button if b.label == "Run analysis").disabled
+    assert not results
 
 
 def test_the_app_shows_a_training_recording_out_of_fold(open_app, trained, monkeypatch):
@@ -556,14 +617,19 @@ def test_the_app_shows_a_training_recording_out_of_fold(open_app, trained, monke
     app = open_app()
 
     app.file_uploader[0].set_value(_upload(trained.training)).run()
+    _analyse(app)
 
-    assert not app.exception and not app.error
     (result,) = results
     assert result["training_recording"] is True
+    app.switch_page("views/evaluation.py").run()
+    assert not app.exception and not app.error
     explanation = next(i.value for i in app.info if "training recording" in i.value)
     assert "sub-pd3 ses-off" in explanation and "never saw this participant" in explanation
     assert any("Out of fold (fold" in m.value for m in app.markdown)
     assert any("Out-of-fold results come from models" in c.value for c in app.caption)
+    page = _html(app)
+    assert page.count('<div class="nl-prov active">') == 2  # held-out participant, out of fold
+    assert "Never shown" in page  # a prediction on training data
 
 
 # --- the same features as training, on a ds002778 recording -------------------------------------
